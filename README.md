@@ -4,7 +4,11 @@ Internal executive briefing on an internally built agentic workflow for IMDS MDS
 
 ## Presentation
 
-Open **[presentations/IMDS_Agentic_Workflow.pptx](presentations/IMDS_Agentic_Workflow.pptx)** in Microsoft PowerPoint (widescreen 16:9).
+- **Live briefing (GitHub Pages):** https://rockyforever8-sys.github.io/Agentic-MDS/
+- **PowerPoint:** [presentations/IMDS_Agentic_Workflow.pptx](presentations/IMDS_Agentic_Workflow.pptx) or [docs/IMDS_Agentic_Workflow.pptx](docs/IMDS_Agentic_Workflow.pptx)
+- **PDF:** [docs/IMDS_Agentic_Workflow.pdf](docs/IMDS_Agentic_Workflow.pdf)
+
+Open the `.pptx` in Microsoft PowerPoint (widescreen 16:9) for the meeting. Use the Pages site for browser review. The repo is public; treat the **Internal Confidential** marking as a handling instruction, not access control.
 
 12 slides, ~20 minutes, marked **Internal Confidential**. Presented by the Supplier Quality Director to VP/GM of Operations, Supply Chain, Quality, and HR.
 
