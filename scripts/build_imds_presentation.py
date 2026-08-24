@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the 12-slide executive IMDS agentic-workflow briefing."""
+"""Build the 13-slide executive IMDS agentic-workflow briefing."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ LIGHT_TEAL = RGBColor(0xE5, 0xF3, 0xF1)
 LINE = RGBColor(0xDE, 0xE3, 0xE9)
 
 FONT = "Calibri"
-TOTAL = 12
+TOTAL = 13
 OUT = Path(__file__).resolve().parents[1] / "presentations" / "IMDS_Agentic_Workflow.pptx"
 
 
@@ -719,6 +719,116 @@ def s12_ask(prs):
     )
 
 
+def s13_appendix(prs):
+    sl = prs.slides.add_slide(prs.slide_layouts[6])
+    rect(sl, 0, 0, W, H, WHITE)
+    header(
+        sl,
+        "Appendix",
+        "Glossary and v0 OEM checklists",
+        "Reference for Q&A. Validate against current GM / VW / Ford IMDS portals before production use.",
+    )
+    glossary = [
+        ("Air cover", "Leadership backs SQ to automate without reopening buy/hire every week."),
+        ("Parallel inbox", "Hire more people to do the same manual view/accept/reject work."),
+        ("PCF", "Product Carbon Footprint — emissions per part (Rec 027; not in v1)."),
+        ("Directed buy", "OEM nominates sub-supplier; lower tier Proposes to OEM and to you."),
+        ("Overlay", "OEM-specific rules on top of Rec 001 + IMDS Check."),
+        ("Deduplicate", "One queue item per real MDS — no double-processing resends."),
+        ("Age", "Time in status; prioritize VIP OEM parts and SLA risk."),
+        ("Dummy child", "Placeholder node instead of accepted sub-supplier MDS."),
+        ("Score / cite", "Rate green/amber/red; flag exact tree node and field."),
+        ("Structured reject", "Templated, coded reason — not “check Rec 001.”"),
+        ("Pre-flight", "Run OEM pack on outbound MDS before Propose/Send."),
+        ("Orphan decision", "Accept/reject with no rule-pack version on record."),
+        ("Amber / novel", "Uncertain or new case — human decides, bot does not."),
+        ("OEM-rule owner", "Specialist owns GM/VW/Ford packs, not inbox volume."),
+    ]
+    # glossary table 2 columns of term | meaning
+    rows = [["Term", "Meaning", "Term", "Meaning"]]
+    for i in range(0, len(glossary), 2):
+        a, b = glossary[i]
+        if i + 1 < len(glossary):
+            c, d = glossary[i + 1]
+        else:
+            c, d = "", ""
+        rows.append([a, b, c, d])
+    table_shape = sl.shapes.add_table(len(rows), 4, Inches(0.45), Inches(1.12), Inches(12.4), Inches(2.55))
+    table = table_shape.table
+    widths = [1.55, 4.65, 1.55, 4.65]
+    for i, w in enumerate(widths):
+        table.columns[i].width = Inches(w)
+    for r, row in enumerate(rows):
+        for c, val in enumerate(row):
+            cell = table.cell(r, c)
+            if r == 0:
+                set_cell(cell, val, 10, WHITE, True, NAVY, PP_ALIGN.CENTER)
+            elif c in (0, 2):
+                set_cell(cell, val, 9, NAVY, True, LIGHT_GOLD if r % 2 else OFF)
+            else:
+                set_cell(cell, val, 9, SLATE, False, WHITE if r % 2 else OFF)
+
+    add_text(
+        sl,
+        Inches(0.5),
+        Inches(3.72),
+        Inches(12.3),
+        Inches(0.28),
+        [("v0 pre-Propose checklist — encode into Reviewer agent (days 1–30)", 12, NAVY, True)],
+    )
+    oems = [
+        ("GM", TEAL, [
+            "Propose (not Send); internally released",
+            "Correct GM org unit / plant recipient",
+            "Part number + description on recipient tab",
+            "Weight within GM tolerance; GMW3059 clean",
+            "Forwarding allowed if pass-through; no dummy children",
+        ]),
+        ("VW", BLUE, [
+            "VW 91101 + Konzern IMDS instructions",
+            "Correct plant / org ID on recipient",
+            "Part naming per VW guide; sibling rules",
+            "Polymer marking / process fields if required",
+            "VW pack pre-flight — no reds before Propose",
+        ]),
+        ("Ford", COPPER, [
+            "Ford RSMS substance compliance",
+            "Supplier code + part number pairing",
+            "Legacy / EOP flags if applicable",
+            "Correct Ford org unit; tree vs BOM",
+            "Ford pack pre-flight — no reds before Propose",
+        ]),
+    ]
+    x = Inches(0.5)
+    for title, color, items in oems:
+        card(sl, x, Inches(4.02), Inches(4.0), Inches(2.95), WHITE, LINE)
+        rect(sl, x, Inches(4.02), Inches(4.0), Inches(0.42), color)
+        add_text(sl, x + Inches(0.14), Inches(4.08), Inches(3.72), Inches(0.32), [(title, 13, WHITE, True)])
+        add_bullets(sl, x + Inches(0.14), Inches(4.52), Inches(3.72), Inches(2.35), items, 11, SLATE, 6)
+        x += Inches(4.15)
+
+    add_text(
+        sl,
+        Inches(0.5),
+        Inches(7.02),
+        Inches(12.3),
+        Inches(0.22),
+        [
+            (
+                "Predco vendor-reported (−89% rejects, −72% cycle): industry proof only — not our ROI. HR: role shifts from inbox clerk to OEM-rule owner + exception judgment.",
+                10,
+                MUTED,
+                False,
+            )
+        ],
+    )
+    footer(sl, 13)
+    notes(
+        sl,
+        "Appendix — use only if asked in Q&A; do not present in the 20-minute slot unless someone asks for definitions. Full elaboration: Air cover = VP/GM publicly defends automation. Parallel inbox = hiring without encoding rules. Directed buy example: GM directs Tier-2 bracket; they Propose to GM and to us. Dummy child chase = email sub-suppliers with missing accepted child MDS. Orphan decision = audit cannot replay which rule version applied. Amber examples: weight near limit, new supplier. Novel: derogation, new chemistry. OEM-rule owner job description: maintain rule packs, audit auto-greens, coach suppliers. Sources: public.mdsystem.com OEM guides, GMW3059, VW 91101, Ford RSMS.",
+    )
+
+
 def main():
     prs = Presentation()
     prs.slide_width = W
@@ -736,6 +846,7 @@ def main():
         s10_governance,
         s11_targets,
         s12_ask,
+        s13_appendix,
     ]
     global TOTAL
     TOTAL = len(builders)

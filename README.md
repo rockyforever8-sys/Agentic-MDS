@@ -11,7 +11,7 @@ Internal executive briefing on an internally built agentic workflow for IMDS MDS
 
 Open the `.pptx` in Microsoft PowerPoint (widescreen 16:9) for the meeting. Use the Pages site for browser review. The repo is public; treat the **Internal Confidential** marking as a handling instruction, not access control.
 
-12 slides, ~20 minutes, marked **Internal Confidential**. Presented by the Supplier Quality Director to VP/GM of Operations, Supply Chain, Quality, and HR.
+12 slides, ~20 minutes (+ 1 appendix for Q&A), marked **Internal Confidential**. Presented by the Supplier Quality Director to VP/GM of Operations, Supply Chain, Quality, and HR.
 
 Covers:
 
