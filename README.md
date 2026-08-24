@@ -4,8 +4,8 @@ Internal executive briefing on an internally built agentic workflow for IMDS MDS
 
 ## Presentation
 
-- **Live now (CDN):** https://cdn.jsdelivr.net/gh/rockyforever8-sys/Agentic-MDS@1ffbedc/docs/index.html
-- **GitHub Pages (after one-time enable):** https://rockyforever8-sys.github.io/Agentic-MDS/
+- **Live briefing:** https://cdn.jsdelivr.net/gh/rockyforever8-sys/Agentic-MDS@e713cf0/docs/index.html
+- **GitHub Pages (after enable):** https://rockyforever8-sys.github.io/Agentic-MDS/
 - **PowerPoint:** [presentations/IMDS_Agentic_Workflow.pptx](presentations/IMDS_Agentic_Workflow.pptx) or [docs/IMDS_Agentic_Workflow.pptx](docs/IMDS_Agentic_Workflow.pptx)
 - **PDF:** [docs/IMDS_Agentic_Workflow.pdf](docs/IMDS_Agentic_Workflow.pdf)
 
