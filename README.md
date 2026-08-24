@@ -1,20 +1,22 @@
 # Agentic MDS
 
-PowerPoint briefing on the International Material Data System (IMDS): how suppliers review and submit Material Data Sheets (MDS), where daily inbox time goes, and how an agentic workflow can improve that work.
+Internal executive briefing on an internally built agentic workflow for IMDS MDS review and approval.
 
 ## Presentation
 
 Open **[presentations/IMDS_Agentic_Workflow.pptx](presentations/IMDS_Agentic_Workflow.pptx)** in Microsoft PowerPoint (widescreen 16:9).
 
-The deck covers:
+12 slides, ~20 minutes, marked **Internal Confidential**. Presented by the Supplier Quality Director to VP/GM of Operations, Supply Chain, Quality, and HR.
 
-1. Introduction of IMDS
-2. Supplier roles in tier MDS submission
-3. Daily time on verifying inbox, accepting, rejecting, forwarding, and proposing
-4. Value of an agentic workflow
-5. Available tools and innovations for MDS review and approval
+Covers:
 
-Speaker notes are included on every slide.
+1. Introduction of IMDS (production gate, Rec 001, PPAP)
+2. Supplier roles in tier MDS submission (six inbox actions; GM / VW / Ford overlays)
+3. Daily time and the ~5,000 open MDS backlog
+4. Agentic auto-accept / auto-reject model we will build
+5. Market options as proof — recommendation is to **build**, at zero software spend
+
+Speaker notes are timed on every slide.
 
 ## Rebuild
 
@@ -22,5 +24,3 @@ Speaker notes are included on every slide.
 pip install -r requirements.txt
 python scripts/build_imds_presentation.py
 ```
-
-The generator writes `presentations/IMDS_Agentic_Workflow.pptx`.
