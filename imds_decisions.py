@@ -12,8 +12,8 @@ from typing import Optional
 
 RULE_PACK_VERSION = "rec001-v1"
 
-# Matches both IMDS UI text and the agent's previous comma-normalized form.
-# Use [(]s[)] not \(s\) — Colab/IPython treats \( ... \) as LaTeX and splits the string.
+# Matches both IMDS UI text and the comma-normalized form.
+# Character class [(]s[)] is used so Colab/IPython does not treat this as LaTeX.
 ERROR_WARNING_RE = re.compile(
     r"(\d+)\s*Error[(]s[)]\s*(?:/|,)\s*(\d+)\s*Warning[(]s[)]",
     re.IGNORECASE,
@@ -238,6 +238,44 @@ def decide_overall(
         rule_pack_version=rule_pack_version,
         check_errors=counts.errors,
         check_warnings=counts.warnings,
+    )
+
+
+def apply_autonomous_policy(
+    decision: Decision,
+    *,
+    hold_amber: bool = False,
+    mds_id: str = "",
+    check_result: str = "",
+) -> Decision:
+    """Live inbox policy: PASS → accept; FAIL → reject; AMBER → reject unless held.
+
+    Tool/UI failure (Check did not run) always stays HOLD so we never reject a
+    sheet we could not actually score.
+    """
+    if decision.action != "hold":
+        return decision
+    if hold_amber:
+        return decision
+    if _is_tool_failure(check_result):
+        return decision
+    reasons = list(decision.reasons) + [
+        "Autonomous live run: not a clean PASS, treating as FAIL"
+    ]
+    return Decision(
+        band="RED",
+        overall="FAIL",
+        action="reject",
+        reasons=reasons,
+        reject_text=build_reject_text(
+            mds_id=mds_id,
+            reasons=reasons,
+            check_result=check_result,
+            rule_pack_version=decision.rule_pack_version,
+        ),
+        rule_pack_version=decision.rule_pack_version,
+        check_errors=decision.check_errors,
+        check_warnings=decision.check_warnings,
     )
 
 

@@ -36,7 +36,7 @@ python imds_agent_v2.py --self-test   # no IMDS login
 # python imds_agent_v2.py             # live run; needs IMDS_USERNAME, IMDS_PASSWORD, OTP_SECRET
 ```
 
-`--self-test` does not log into IMDS. Kill switch: `IMDS_KILL_SWITCH=1` or `imds_output/KILL`. Forward/Propose is off unless `IMDS_AUTO_FORWARD=1`.
+`--self-test` does not log into IMDS. Live default: **10 MDS**, PASS → accept + forward + propose, FAIL → reject. Kill switch: `IMDS_KILL_SWITCH=1` or `imds_output/KILL`. Set `IMDS_HOLD_AMBER=1` to hold warnings for a human instead of rejecting them.
 
 ## Rebuild
 
