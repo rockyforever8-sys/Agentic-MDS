@@ -2,5 +2,9 @@ docs/demo-frames/
 imds_output/
 imds_output_selftest/
 .env
+*.enc
+.imds/
+imds_private/
+**/credentials.enc
 *.pyc
 __pycache__/

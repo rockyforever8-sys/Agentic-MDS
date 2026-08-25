@@ -248,19 +248,17 @@ def apply_autonomous_policy(
     mds_id: str = "",
     check_result: str = "",
 ) -> Decision:
-    """Live inbox policy: PASS → accept; FAIL → reject; AMBER → reject unless held.
+    """Live inbox policy: PASS → accept; everything else → reject.
 
-    Tool/UI failure (Check did not run) always stays HOLD so we never reject a
-    sheet we could not actually score.
+    Amber, warnings, parts-marking gaps, and Check UI failure are rejected
+    unless hold_amber=True.
     """
     if decision.action != "hold":
         return decision
     if hold_amber:
         return decision
-    if _is_tool_failure(check_result):
-        return decision
     reasons = list(decision.reasons) + [
-        "Autonomous live run: not a clean PASS, treating as FAIL"
+        "Autonomous live run: amber treated as FAIL and rejected"
     ]
     return Decision(
         band="RED",
