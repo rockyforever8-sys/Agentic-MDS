@@ -13,8 +13,9 @@ from typing import Optional
 RULE_PACK_VERSION = "rec001-v1"
 
 # Matches both IMDS UI text and the agent's previous comma-normalized form.
+# Use [(]s[)] not \(s\) — Colab/IPython treats \( ... \) as LaTeX and splits the string.
 ERROR_WARNING_RE = re.compile(
-    r"(\d+)\s*Error\(s\)\s*(?:/|,)\s*(\d+)\s*Warning\(s\)",
+    r"(\d+)\s*Error[(]s[)]\s*(?:/|,)\s*(\d+)\s*Warning[(]s[)]",
     re.IGNORECASE,
 )
 PASSED_RE = re.compile(r"passed all included checks", re.IGNORECASE)
