@@ -27,16 +27,19 @@ Speaker notes are timed on every slide.
 ## IMDS Colab agent
 
 - **Logic:** [`imds_decisions.py`](imds_decisions.py) (green / amber / red, no Playwright)
+- **Private secrets:** [`imds_secrets.py`](imds_secrets.py) (Colab 🔑 + encrypted vault, never committed)
 - **Playwright agent:** [`imds_agent_v2.py`](imds_agent_v2.py)
-- **Colab notebook:** [`Agentic_MDS.ipynb`](Agentic_MDS.ipynb) (secrets from the 🔑 panel only)
+- **Colab notebook:** [`Agentic_MDS.ipynb`](Agentic_MDS.ipynb) — one green **Run IMDS until complete** button
+
+Put `IMDS_USERNAME`, `IMDS_PASSWORD`, `OTP_SECRET`, and `IMDS_MASTER_KEY` in Colab Secrets. They are private to your Google account. The notebook encrypts a vault to Drive `MyDrive/imds_private/credentials.enc` (gitignored).
 
 ```bash
 python -m unittest discover -s tests -v
 python imds_agent_v2.py --self-test   # no IMDS login
-# python imds_agent_v2.py             # live run; needs IMDS_USERNAME, IMDS_PASSWORD, OTP_SECRET
+# python imds_agent_v2.py             # live run
 ```
 
-`--self-test` does not log into IMDS. Live default: **10 MDS**, PASS → accept + forward + propose, FAIL → reject. Kill switch: `IMDS_KILL_SWITCH=1` or `imds_output/KILL`. Set `IMDS_HOLD_AMBER=1` to hold warnings for a human instead of rejecting them.
+Live default: **10 MDS**. PASS → accept + forward + propose. FAIL **and amber** → reject. Report: `imds_output/mds_status_report.csv` keyed by MDS ID. Kill switch: `IMDS_KILL_SWITCH=1` or `imds_output/KILL`.
 
 ## Rebuild
 

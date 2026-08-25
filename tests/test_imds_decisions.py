@@ -201,7 +201,7 @@ class AutonomousLivePolicyTests(unittest.TestCase):
         self.assertEqual(d.action, "hold")
         live = apply_autonomous_policy(d, mds_id="2 / 1", check_result="0 Error(s) / 2 Warning(s)")
         self.assertEqual(live.action, "reject")
-        self.assertIn("treating as FAIL", live.reject_text)
+        self.assertIn("amber treated as FAIL", live.reject_text)
 
     def test_warnings_stay_hold_when_requested(self):
         d = decide_overall(
@@ -215,15 +215,16 @@ class AutonomousLivePolicyTests(unittest.TestCase):
         )
         self.assertEqual(live.action, "hold")
 
-    def test_check_ui_failure_never_auto_rejects(self):
+    def test_check_ui_failure_is_rejected(self):
         d = decide_overall(
             check_result="Check failed",
             recyclate_check="PASS",
             biocidal_check="PASS",
             parts_marking_check="PASS",
+            mds_id="8 / 1",
         )
-        live = apply_autonomous_policy(d, check_result="Check failed")
-        self.assertEqual(live.action, "hold")
+        live = apply_autonomous_policy(d, mds_id="8 / 1", check_result="Check failed")
+        self.assertEqual(live.action, "reject")
 
 
 if __name__ == "__main__":

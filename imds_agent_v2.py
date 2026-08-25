@@ -127,6 +127,17 @@ def _require_env(name: str) -> str:
 
 
 def load_config() -> Config:
+    from imds_secrets import apply_stored_credentials, missing_secret_keys
+
+    apply_stored_credentials(persist=True)
+    missing = missing_secret_keys()
+    if missing:
+        raise RuntimeError(
+            "Missing private credentials: "
+            + ", ".join(missing)
+            + ". Add them in Colab Secrets (🔑) together with IMDS_MASTER_KEY, "
+            "or unlock the encrypted vault. Never put passwords in the notebook."
+        )
     output_dir = Path(os.getenv("IMDS_OUTPUT_DIR", "./imds_output"))
     output_dir.mkdir(parents=True, exist_ok=True)
     recipients_raw = os.getenv("RECIPIENT_COMPANY_IDS", "9994,293798")
@@ -960,6 +971,60 @@ def write_excel(cfg: Config, results: list[dict]) -> Path | None:
     return path
 
 
+def _final_status(row: dict) -> str:
+    if (row.get("Action") or "").lower() == "accept":
+        return "ACCEPT"
+    return "REJECT"
+
+
+def write_status_report(cfg: Config, results: list[dict]) -> Path:
+    """One-row-per-MDS accept/reject report keyed by MDS ID."""
+    csv_path = cfg.output_dir / "mds_status_report.csv"
+    xlsx_path = cfg.output_dir / "mds_status_report.xlsx"
+    md_path = cfg.output_dir / "mds_status_report.md"
+    lines = ["mds_id,result,imds_acted,reasons"]
+    md = [
+        "# IMDS accept / reject report",
+        "",
+        "| MDS ID | Result | IMDS acted | Reasons |",
+        "|---|---|---|---|",
+    ]
+    try:
+        from openpyxl import Workbook
+    except ImportError:
+        import subprocess
+
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "openpyxl"])
+        from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "MDS Status"
+    ws.append(["MDS ID", "Result", "IMDS acted", "Reasons"])
+    counts = {"ACCEPT": 0, "REJECT": 0}
+    for row in results:
+        mds_id = row.get("MDS ID / Version") or ""
+        result = _final_status(row)
+        counts[result] = counts.get(result, 0) + 1
+        acted = row.get("Acted") or ""
+        reasons = (row.get("Reasons") or "").replace("\n", " ").replace(",", ";")
+        lines.append(f"{mds_id},{result},{acted},{reasons}")
+        md.append(f"| {mds_id} | {result} | {acted} | {reasons} |")
+        ws.append([mds_id, result, acted, row.get("Reasons") or ""])
+    md.extend(["", f"Accepted: {counts.get('ACCEPT', 0)}  Rejected: {counts.get('REJECT', 0)}"])
+    csv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    md_path.write_text("\n".join(md) + "\n", encoding="utf-8")
+    wb.save(str(xlsx_path))
+    log.info(
+        "Status report: %s ACCEPT, %s REJECT → %s",
+        counts.get("ACCEPT", 0),
+        counts.get("REJECT", 0),
+        csv_path,
+    )
+    print("\n".join(md))
+    return csv_path
+
+
 def process_rows_and_export(page, cfg: Config) -> list[dict]:
     results: list[dict] = []
     for i in range(cfg.num_iterations):
@@ -1100,6 +1165,7 @@ def process_rows_and_export(page, cfg: Config) -> list[dict]:
             go_back_to_inbox(page, cfg)
 
     write_excel(cfg, results)
+    write_status_report(cfg, results)
     return results
 
 
@@ -1194,6 +1260,7 @@ def _write_fixture_excel(output_dir: Path) -> Path:
         )
         append_audit(cfg, {"event": "fixture", "mds_id": mds_id, "band": decision.band})
     path = write_excel(cfg, rows)
+    write_status_report(cfg, rows)
     assert path and path.exists()
     bands = [row["Decision Band"] for row in rows]
     if bands != ["GREEN", "AMBER", "RED"]:
@@ -1212,6 +1279,8 @@ def run_self_test(tmp_dir: str | None = None) -> int:
                 child.unlink()
     output.mkdir(parents=True, exist_ok=True)
 
+    os.environ["IMDS_SKIP_VAULT"] = "1"
+    os.environ["IMDS_VAULT_PATH"] = str(output / "no-vault.enc")
     # Config fail-fast without secrets
     saved = {k: os.environ.pop(k, None) for k in ("IMDS_USERNAME", "IMDS_PASSWORD", "OTP_SECRET")}
     try:
@@ -1231,8 +1300,13 @@ def run_self_test(tmp_dir: str | None = None) -> int:
 
     excel_path = _write_fixture_excel(output)
     jsonl = output / "decisions.jsonl"
+    report = output / "mds_status_report.csv"
     print(f"OK   fixture excel {excel_path} ({excel_path.stat().st_size} bytes)")
     print(f"OK   audit jsonl   {jsonl} ({jsonl.stat().st_size} bytes)")
+    if not report.exists():
+        print("FAIL: missing mds_status_report.csv")
+        return 1
+    print(f"OK   status report {report} ({report.stat().st_size} bytes)")
     print("self-test OK (agent fixtures; no IMDS login)")
     return 0
 

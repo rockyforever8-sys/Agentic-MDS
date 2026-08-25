@@ -11,8 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def as_source_lines(text: str) -> list[str]:
     if not text.endswith("\n"):
         text += "\n"
-    lines = text.splitlines(keepends=True)
-    return lines
+    return text.splitlines(keepends=True)
 
 
 def code_cell(source: str, cell_id: str) -> dict:
@@ -34,105 +33,119 @@ def markdown_cell(source: str, cell_id: str) -> dict:
 
 
 def main() -> None:
-    decisions = (ROOT / "imds_decisions.py").read_text(encoding="utf-8")
-    agent = (ROOT / "imds_agent_v2.py").read_text(encoding="utf-8")
-    if r"\(" in decisions or r"\(" in agent:
-        raise SystemExit(
-            "Refusing to embed scripts: backslash-open-paren still present. "
-            "Colab treats that as LaTeX and will break %%writefile."
-        )
+    files = {
+        "imds_decisions.py": ROOT / "imds_decisions.py",
+        "imds_secrets.py": ROOT / "imds_secrets.py",
+        "imds_agent_v2.py": ROOT / "imds_agent_v2.py",
+    }
+    texts = {name: path.read_text(encoding="utf-8") for name, path in files.items()}
+    for name, text in texts.items():
+        if r"\(" in text:
+            raise SystemExit(f"Refusing to embed {name}: backslash-open-paren would break Colab writefile.")
 
     cells = [
         markdown_cell(
-            """# Agentic MDS — complete live IMDS agent
+            """# Agentic MDS — one-button live run
 
-This notebook **contains the full scripts**. Run every cell in order.
+Set secrets **once** in Colab 🔑 (left sidebar). They stay in your Google account and are **not** in this public notebook or GitHub.
 
-**Live session (defaults):**
-- 10 MDS from Received / not-yet-browsed
-- Overall **PASS** → Accept, then Forward, then Propose
-- Overall **FAIL** → Reject with structured reason text
-- If IMDS Check did not run, that MDS is held (not rejected)
+| Secret | Purpose |
+|---|---|
+| `IMDS_USERNAME` | IMDS login |
+| `IMDS_PASSWORD` | IMDS password |
+| `OTP_SECRET` | Authenticator TOTP seed |
+| `IMDS_MASTER_KEY` | Passphrase that encrypts the private vault |
 
-Required Colab secrets (🔑): `IMDS_USERNAME`, `IMDS_PASSWORD`, `OTP_SECRET` (authenticator TOTP seed, not a Gmail app password).
+The agent also writes an encrypted vault to Google Drive `MyDrive/imds_private/credentials.enc` if Drive is mounted, otherwise `~/.imds/credentials.enc`. That file is gitignored.
 
-Optional secrets: `IMDS_CONTACT_NAME` (default `Qu, Theresa`), `RECIPIENT_COMPANY_IDS` (default `9994,293798`), `NUM_ITERATIONS` (default `10`).
-
-Kill switch: set `IMDS_KILL_SWITCH=1` or create `imds_output/KILL`.
-
-The complete agent also lives in the repo as `imds_agent_v2.py` (it imports `imds_decisions.py`).""",
+Then click **Run IMDS until complete**. It processes 10 MDS: **PASS → accept + forward + propose**, **FAIL or amber → reject**, and writes `imds_output/mds_status_report.csv` by MDS ID.""",
             "md-intro",
         ),
         code_cell(
-            "%pip install playwright openpyxl nest_asyncio pyotp\n!playwright install --with-deps chromium",
+            "%pip install playwright openpyxl nest_asyncio pyotp cryptography ipywidgets\n"
+            "!playwright install --with-deps chromium",
             "install",
         ),
+        code_cell("%%writefile imds_decisions.py\n" + texts["imds_decisions.py"].rstrip() + "\n", "write-decisions"),
+        code_cell("%%writefile imds_secrets.py\n" + texts["imds_secrets.py"].rstrip() + "\n", "write-secrets"),
+        code_cell("%%writefile imds_agent_v2.py\n" + texts["imds_agent_v2.py"].rstrip() + "\n", "write-agent"),
         code_cell(
-            '''import os
+            """# Self-test only. No IMDS login and no private passwords required.
+!python -m py_compile imds_decisions.py imds_secrets.py imds_agent_v2.py
+!python imds_agent_v2.py --self-test""",
+            "self-test",
+        ),
+        code_cell(
+            '''# ONE BUTTON: load private secrets, run until complete, show accept/reject report.
+import os
+from pathlib import Path
+from IPython.display import display
+import ipywidgets as widgets
 
-# Load secrets from Colab Secrets (🔑 left sidebar). Never commit passwords.
 try:
-    from google.colab import userdata
+    from google.colab import userdata, drive
     for _key in (
-        "IMDS_USERNAME",
-        "IMDS_PASSWORD",
-        "OTP_SECRET",
-        "IMDS_CONTACT_NAME",
-        "RECIPIENT_COMPANY_IDS",
-        "IMDS_AUTO_ACCEPT",
-        "IMDS_AUTO_REJECT",
-        "IMDS_AUTO_FORWARD",
-        "IMDS_HOLD_AMBER",
-        "IMDS_KILL_SWITCH",
-        "NUM_ITERATIONS",
-        "IMDS_REQUIRE_PARTS_MARKING",
+        "IMDS_USERNAME", "IMDS_PASSWORD", "OTP_SECRET", "IMDS_MASTER_KEY",
+        "IMDS_CONTACT_NAME", "RECIPIENT_COMPANY_IDS", "NUM_ITERATIONS",
     ):
         try:
-            os.environ[_key] = userdata.get(_key)
+            val = userdata.get(_key)
+            if val:
+                os.environ[_key] = val
+        except Exception:
+            pass
+    if Path("/content/drive/MyDrive").exists() is False:
+        try:
+            drive.mount("/content/drive")
         except Exception:
             pass
 except ImportError:
     pass
 
-os.environ.setdefault("IMDS_INBOX_URL", "https://www.mdsystem.com/imdsnt/faces/sentReceivedSearch")
 os.environ.setdefault("NUM_ITERATIONS", "10")
 os.environ.setdefault("IMDS_AUTO_ACCEPT", "1")
 os.environ.setdefault("IMDS_AUTO_REJECT", "1")
 os.environ.setdefault("IMDS_AUTO_FORWARD", "1")
-os.environ.setdefault("RECIPIENT_COMPANY_IDS", "9994,293798")
-os.environ.setdefault("IMDS_CONTACT_NAME", "Qu, Theresa")
+os.environ.setdefault("IMDS_HOLD_AMBER", "0")
 
-_missing = [k for k in ("IMDS_USERNAME", "IMDS_PASSWORD", "OTP_SECRET") if not os.getenv(k)]
-if _missing:
-    raise RuntimeError(
-        "Missing Colab secrets: " + ", ".join(_missing) +
-        ". Open the Secrets panel, add them, then re-run this cell."
-    )
-print(
-    "Ready. iterations=%s auto_forward=%s recipients=%s contact=%s"
-    % (
-        os.environ.get("NUM_ITERATIONS"),
-        os.environ.get("IMDS_AUTO_FORWARD"),
-        os.environ.get("RECIPIENT_COMPANY_IDS"),
-        os.environ.get("IMDS_CONTACT_NAME"),
-    )
-)''',
-            "secrets",
-        ),
-        code_cell("%%writefile imds_decisions.py\n" + decisions.rstrip() + "\n", "write-decisions"),
-        code_cell("%%writefile imds_agent_v2.py\n" + agent.rstrip() + "\n", "write-agent"),
-        code_cell(
-            """# Compile check, then self-test (no IMDS login).
-!python -m py_compile imds_decisions.py imds_agent_v2.py
-!python imds_agent_v2.py --self-test""",
-            "self-test",
-        ),
-        code_cell(
-            """# LIVE IMDS session: 10 MDS.
-# PASS → accept + forward + propose. FAIL → reject.
-# Skip until --self-test is green and secrets are set.
-!python imds_agent_v2.py""",
-            "run-agent",
+from imds_secrets import apply_stored_credentials, missing_secret_keys
+apply_stored_credentials(persist=True)
+
+run_btn = widgets.Button(
+    description="Run IMDS until complete",
+    button_style="success",
+    layout=widgets.Layout(width="280px", height="48px"),
+)
+out = widgets.Output()
+
+
+def _on_run(_):
+    with out:
+        out.clear_output()
+        apply_stored_credentials(persist=True)
+        missing = missing_secret_keys()
+        if missing:
+            raise RuntimeError(
+                "Private secrets missing: " + ", ".join(missing) +
+                ". Add IMDS_USERNAME, IMDS_PASSWORD, OTP_SECRET, and IMDS_MASTER_KEY in Colab Secrets."
+            )
+        from imds_agent_v2 import orchestrate
+        rc = orchestrate()
+        print("exit code", rc)
+        report = Path("imds_output/mds_status_report.csv")
+        if report.exists():
+            try:
+                import pandas as pd
+                from IPython.display import display as show
+                show(pd.read_csv(report))
+            except Exception:
+                print(report.read_text())
+
+
+run_btn.on_click(_on_run)
+display(run_btn, out)
+print("Secrets loaded:", not bool(missing_secret_keys()), "| click the green button")''',
+            "one-button",
         ),
     ]
 
