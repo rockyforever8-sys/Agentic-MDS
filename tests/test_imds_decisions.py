@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from imds_decisions import (
+    apply_autonomous_policy,
     build_reject_text,
     decide_overall,
     env_flag,
@@ -165,6 +166,64 @@ class IdMatchAndFlagsTests(unittest.TestCase):
 
     def test_embedded_self_test(self):
         self.assertEqual(run_self_test(), 0)
+
+
+class AutonomousLivePolicyTests(unittest.TestCase):
+    def test_pass_stays_accept(self):
+        d = decide_overall(
+            check_result="0 Error(s), 0 Warning(s)",
+            recyclate_check="PASS",
+            biocidal_check="PASS",
+            parts_marking_check="PASS",
+        )
+        live = apply_autonomous_policy(d, check_result="0 Error(s), 0 Warning(s)")
+        self.assertEqual(live.action, "accept")
+
+    def test_errors_stay_reject(self):
+        d = decide_overall(
+            check_result="2 Error(s) / 0 Warning(s)",
+            recyclate_check="PASS",
+            biocidal_check="PASS",
+            parts_marking_check="PASS",
+            mds_id="1 / 1",
+        )
+        live = apply_autonomous_policy(d, mds_id="1 / 1", check_result="2 Error(s) / 0 Warning(s)")
+        self.assertEqual(live.action, "reject")
+
+    def test_warnings_become_reject_in_live_mode(self):
+        d = decide_overall(
+            check_result="0 Error(s) / 2 Warning(s)",
+            recyclate_check="PASS",
+            biocidal_check="PASS",
+            parts_marking_check="PASS",
+            mds_id="2 / 1",
+        )
+        self.assertEqual(d.action, "hold")
+        live = apply_autonomous_policy(d, mds_id="2 / 1", check_result="0 Error(s) / 2 Warning(s)")
+        self.assertEqual(live.action, "reject")
+        self.assertIn("treating as FAIL", live.reject_text)
+
+    def test_warnings_stay_hold_when_requested(self):
+        d = decide_overall(
+            check_result="0 Error(s) / 2 Warning(s)",
+            recyclate_check="PASS",
+            biocidal_check="PASS",
+            parts_marking_check="PASS",
+        )
+        live = apply_autonomous_policy(
+            d, hold_amber=True, check_result="0 Error(s) / 2 Warning(s)"
+        )
+        self.assertEqual(live.action, "hold")
+
+    def test_check_ui_failure_never_auto_rejects(self):
+        d = decide_overall(
+            check_result="Check failed",
+            recyclate_check="PASS",
+            biocidal_check="PASS",
+            parts_marking_check="PASS",
+        )
+        live = apply_autonomous_policy(d, check_result="Check failed")
+        self.assertEqual(live.action, "hold")
 
 
 if __name__ == "__main__":

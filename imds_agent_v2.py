@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""IMDS Playwright agent — check, score, accept greens, reject reds, hold amber.
+"""IMDS Playwright agent — live inbox: check 10 MDS, accept+forward+propose PASS, reject FAIL.
 
-v1 controls (from the executive briefing):
-- GREEN (0 errors / 0 warnings + Rec 001 recyclate/biocidal pass) → auto-accept
-- RED (IMDS Check errors or Rec 001 recyclate/biocidal fail) → auto-reject with structured text
-- AMBER (warnings, parts marking, tool failure, novel) → Excel/JSONL only, no IMDS action
+Live session (defaults):
+- Process NUM_ITERATIONS MDS (default 10)
+- Overall PASS → Accept, then Forward, then Propose to recipient company IDs
+- Overall FAIL → Reject with structured Rec 001 / IMDS Check text
+- Tool/UI failure stays on HOLD (do not reject a sheet we could not score)
 - Act on the MDS already open; verify ID/version before Accept/Reject
 - Kill switch: IMDS_KILL_SWITCH=1 or imds_output/KILL
-- Secrets from environment / Colab Secrets only (no defaults)
+- Login secrets from environment / Colab Secrets only (no password defaults)
 
 Does not log into IMDS during --self-test.
 """
@@ -26,6 +27,7 @@ from pathlib import Path
 from imds_decisions import (
     ERROR_WARNING_RE,
     RULE_PACK_VERSION,
+    apply_autonomous_policy,
     decide_overall,
     env_flag,
     kill_switch_active,
@@ -107,6 +109,7 @@ class Config:
     auto_accept: bool
     auto_reject: bool
     auto_forward: bool
+    hold_amber: bool
     require_parts_marking: bool
     debug_screenshots: bool
     headless: bool
@@ -126,7 +129,7 @@ def _require_env(name: str) -> str:
 def load_config() -> Config:
     output_dir = Path(os.getenv("IMDS_OUTPUT_DIR", "./imds_output"))
     output_dir.mkdir(parents=True, exist_ok=True)
-    recipients_raw = os.getenv("RECIPIENT_COMPANY_IDS", "")
+    recipients_raw = os.getenv("RECIPIENT_COMPANY_IDS", "9994,293798")
     recipient_ids = [item.strip() for item in recipients_raw.split(",") if item.strip()]
     return Config(
         username=_require_env("IMDS_USERNAME"),
@@ -136,12 +139,13 @@ def load_config() -> Config:
             "IMDS_INBOX_URL", "https://www.mdsystem.com/imdsnt/faces/sentReceivedSearch"
         ),
         output_dir=output_dir,
-        num_iterations=int(os.getenv("NUM_ITERATIONS", "3")),
+        num_iterations=int(os.getenv("NUM_ITERATIONS", "10")),
         recipient_ids=recipient_ids,
-        contact_name=os.getenv("IMDS_CONTACT_NAME", "").strip(),
+        contact_name=os.getenv("IMDS_CONTACT_NAME", "Qu, Theresa").strip(),
         auto_accept=env_flag(os.getenv("IMDS_AUTO_ACCEPT"), True),
         auto_reject=env_flag(os.getenv("IMDS_AUTO_REJECT"), True),
-        auto_forward=env_flag(os.getenv("IMDS_AUTO_FORWARD"), False),
+        auto_forward=env_flag(os.getenv("IMDS_AUTO_FORWARD"), True),
+        hold_amber=env_flag(os.getenv("IMDS_HOLD_AMBER"), False),
         require_parts_marking=env_flag(os.getenv("IMDS_REQUIRE_PARTS_MARKING"), False),
         debug_screenshots=env_flag(os.getenv("IMDS_DEBUG_SCREENSHOTS"), False),
         headless=env_flag(os.getenv("IMDS_HEADLESS"), True),
@@ -1008,6 +1012,12 @@ def process_rows_and_export(page, cfg: Config) -> list[dict]:
             require_parts_marking=cfg.require_parts_marking,
             rule_pack_version=cfg.rule_pack_version,
         )
+        decision = apply_autonomous_policy(
+            decision,
+            hold_amber=cfg.hold_amber,
+            mds_id=mds_id,
+            check_result=result_msg,
+        )
         log.info(
             "MDS %s band=%s action=%s check=%s recyclate=%s biocidal=%s marking=%s",
             mds_id,
@@ -1098,6 +1108,13 @@ def orchestrate() -> int:
     if kill_is_on(cfg):
         log.error("Kill switch is on (IMDS_KILL_SWITCH or %s). Not starting.", cfg.output_dir / "KILL")
         return 2
+    log.info(
+        "Live session: %s MDS; PASS→accept+forward+propose to %s; FAIL→reject; contact=%s; hold_amber=%s",
+        cfg.num_iterations,
+        ",".join(cfg.recipient_ids) or "(none)",
+        cfg.contact_name or "(none)",
+        cfg.hold_amber,
+    )
 
     from playwright.sync_api import sync_playwright
 

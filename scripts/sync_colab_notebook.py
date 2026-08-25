@@ -34,18 +34,33 @@ def markdown_cell(source: str, cell_id: str) -> dict:
 
 
 def main() -> None:
+    decisions = (ROOT / "imds_decisions.py").read_text(encoding="utf-8")
+    agent = (ROOT / "imds_agent_v2.py").read_text(encoding="utf-8")
+    if r"\(" in decisions or r"\(" in agent:
+        raise SystemExit(
+            "Refusing to embed scripts: backslash-open-paren still present. "
+            "Colab treats that as LaTeX and will break %%writefile."
+        )
+
     cells = [
         markdown_cell(
-            """# Agentic MDS — IMDS inbox agent
+            """# Agentic MDS — complete live IMDS agent
 
-Loads secrets from the Colab 🔑 panel (never from this notebook). **Downloads** `imds_decisions.py` and `imds_agent_v2.py` from GitHub. Do not paste those files into a `%%writefile` cell — Colab treats backslash-open-paren as LaTeX and breaks regex strings.
+This notebook **contains the full scripts**. Run every cell in order.
 
-Then run `--self-test` (no IMDS login), then optionally the live agent.
+**Live session (defaults):**
+- 10 MDS from Received / not-yet-browsed
+- Overall **PASS** → Accept, then Forward, then Propose
+- Overall **FAIL** → Reject with structured reason text
+- If IMDS Check did not run, that MDS is held (not rejected)
 
-Required secrets: `IMDS_USERNAME`, `IMDS_PASSWORD`, `OTP_SECRET` (authenticator TOTP seed, **not** a Gmail app password).
+Required Colab secrets (🔑): `IMDS_USERNAME`, `IMDS_PASSWORD`, `OTP_SECRET` (authenticator TOTP seed, not a Gmail app password).
 
-Optional: `IMDS_CONTACT_NAME`, `RECIPIENT_COMPANY_IDS`, `IMDS_AUTO_FORWARD` (default off), `IMDS_KILL_SWITCH`, `NUM_ITERATIONS`.
-Create `imds_output/KILL` to stop a run.""",
+Optional secrets: `IMDS_CONTACT_NAME` (default `Qu, Theresa`), `RECIPIENT_COMPANY_IDS` (default `9994,293798`), `NUM_ITERATIONS` (default `10`).
+
+Kill switch: set `IMDS_KILL_SWITCH=1` or create `imds_output/KILL`.
+
+The complete agent also lives in the repo as `imds_agent_v2.py` (it imports `imds_decisions.py`).""",
             "md-intro",
         ),
         code_cell(
@@ -56,8 +71,6 @@ Create `imds_output/KILL` to stop a run.""",
             '''import os
 
 # Load secrets from Colab Secrets (🔑 left sidebar). Never commit passwords.
-# Required: IMDS_USERNAME, IMDS_PASSWORD, OTP_SECRET
-# OTP_SECRET is the authenticator TOTP seed (base32), NOT a Gmail app password.
 try:
     from google.colab import userdata
     for _key in (
@@ -69,6 +82,7 @@ try:
         "IMDS_AUTO_ACCEPT",
         "IMDS_AUTO_REJECT",
         "IMDS_AUTO_FORWARD",
+        "IMDS_HOLD_AMBER",
         "IMDS_KILL_SWITCH",
         "NUM_ITERATIONS",
         "IMDS_REQUIRE_PARTS_MARKING",
@@ -81,52 +95,42 @@ except ImportError:
     pass
 
 os.environ.setdefault("IMDS_INBOX_URL", "https://www.mdsystem.com/imdsnt/faces/sentReceivedSearch")
-print("Secrets loaded from Colab/env. IMDS_USERNAME set:" , bool(os.getenv("IMDS_USERNAME")))''',
+os.environ.setdefault("NUM_ITERATIONS", "10")
+os.environ.setdefault("IMDS_AUTO_ACCEPT", "1")
+os.environ.setdefault("IMDS_AUTO_REJECT", "1")
+os.environ.setdefault("IMDS_AUTO_FORWARD", "1")
+os.environ.setdefault("RECIPIENT_COMPANY_IDS", "9994,293798")
+os.environ.setdefault("IMDS_CONTACT_NAME", "Qu, Theresa")
+
+_missing = [k for k in ("IMDS_USERNAME", "IMDS_PASSWORD", "OTP_SECRET") if not os.getenv(k)]
+if _missing:
+    raise RuntimeError(
+        "Missing Colab secrets: " + ", ".join(_missing) +
+        ". Open the Secrets panel, add them, then re-run this cell."
+    )
+print(
+    "Ready. iterations=%s auto_forward=%s recipients=%s contact=%s"
+    % (
+        os.environ.get("NUM_ITERATIONS"),
+        os.environ.get("IMDS_AUTO_FORWARD"),
+        os.environ.get("RECIPIENT_COMPANY_IDS"),
+        os.environ.get("IMDS_CONTACT_NAME"),
+    )
+)''',
             "secrets",
         ),
+        code_cell("%%writefile imds_decisions.py\n" + decisions.rstrip() + "\n", "write-decisions"),
+        code_cell("%%writefile imds_agent_v2.py\n" + agent.rstrip() + "\n", "write-agent"),
         code_cell(
-            '''# Download scripts from GitHub. Do not use %%writefile for these files:
-# Colab/IPython treats backslash-open-paren as LaTeX and splits regex strings.
-from pathlib import Path
-from urllib.request import Request, urlopen
-
-CANDIDATES = [
-    "https://raw.githubusercontent.com/rockyforever8-sys/Agentic-MDS/cursor/colab-regex-syntax-07ca",
-    "https://raw.githubusercontent.com/rockyforever8-sys/Agentic-MDS/main",
-]
-
-
-def download(name: str) -> str:
-    last_err = None
-    for base in CANDIDATES:
-        url = f"{base}/{name}"
-        try:
-            with urlopen(Request(url, headers={"User-Agent": "colab"})) as resp:
-                data = resp.read()
-            Path(name).write_bytes(data)
-            return f"{url} ({len(data)} bytes)"
-        except Exception as exc:
-            last_err = exc
-    raise RuntimeError(f"Could not download {name}: {last_err}")
-
-
-for name in ("imds_decisions.py", "imds_agent_v2.py"):
-    print(download(name))
-
-import py_compile
-py_compile.compile("imds_decisions.py", doraise=True)
-py_compile.compile("imds_agent_v2.py", doraise=True)
-print("compile OK")''',
-            "download-scripts",
-        ),
-        code_cell(
-            """# No IMDS login. Verifies green/amber/red scoring and writes fixture Excel + JSONL.
+            """# Compile check, then self-test (no IMDS login).
+!python -m py_compile imds_decisions.py imds_agent_v2.py
 !python imds_agent_v2.py --self-test""",
             "self-test",
         ),
         code_cell(
-            """# Live IMDS run. Skip this cell until --self-test is green and secrets are set.
-# Kill switch: IMDS_KILL_SWITCH=1 or create imds_output/KILL
+            """# LIVE IMDS session: 10 MDS.
+# PASS → accept + forward + propose. FAIL → reject.
+# Skip until --self-test is green and secrets are set.
 !python imds_agent_v2.py""",
             "run-agent",
         ),
