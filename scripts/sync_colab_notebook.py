@@ -34,14 +34,13 @@ def markdown_cell(source: str, cell_id: str) -> dict:
 
 
 def main() -> None:
-    decisions = (ROOT / "imds_decisions.py").read_text(encoding="utf-8")
-    agent = (ROOT / "imds_agent_v2.py").read_text(encoding="utf-8")
-
     cells = [
         markdown_cell(
             """# Agentic MDS — IMDS inbox agent
 
-Loads secrets from the Colab 🔑 panel (never from this notebook). Writes `imds_decisions.py` and `imds_agent_v2.py`, runs `--self-test` (no IMDS login), then optionally runs the live agent.
+Loads secrets from the Colab 🔑 panel (never from this notebook). **Downloads** `imds_decisions.py` and `imds_agent_v2.py` from GitHub. Do not paste those files into a `%%writefile` cell — Colab treats backslash-open-paren as LaTeX and breaks regex strings.
+
+Then run `--self-test` (no IMDS login), then optionally the live agent.
 
 Required secrets: `IMDS_USERNAME`, `IMDS_PASSWORD`, `OTP_SECRET` (authenticator TOTP seed, **not** a Gmail app password).
 
@@ -85,8 +84,41 @@ os.environ.setdefault("IMDS_INBOX_URL", "https://www.mdsystem.com/imdsnt/faces/s
 print("Secrets loaded from Colab/env. IMDS_USERNAME set:" , bool(os.getenv("IMDS_USERNAME")))''',
             "secrets",
         ),
-        code_cell("%%writefile imds_decisions.py\n" + decisions.rstrip() + "\n", "write-decisions"),
-        code_cell("%%writefile imds_agent_v2.py\n" + agent.rstrip() + "\n", "write-agent"),
+        code_cell(
+            '''# Download scripts from GitHub. Do not use %%writefile for these files:
+# Colab/IPython treats backslash-open-paren as LaTeX and splits regex strings.
+from pathlib import Path
+from urllib.request import Request, urlopen
+
+CANDIDATES = [
+    "https://raw.githubusercontent.com/rockyforever8-sys/Agentic-MDS/cursor/colab-regex-syntax-07ca",
+    "https://raw.githubusercontent.com/rockyforever8-sys/Agentic-MDS/main",
+]
+
+
+def download(name: str) -> str:
+    last_err = None
+    for base in CANDIDATES:
+        url = f"{base}/{name}"
+        try:
+            with urlopen(Request(url, headers={"User-Agent": "colab"})) as resp:
+                data = resp.read()
+            Path(name).write_bytes(data)
+            return f"{url} ({len(data)} bytes)"
+        except Exception as exc:
+            last_err = exc
+    raise RuntimeError(f"Could not download {name}: {last_err}")
+
+
+for name in ("imds_decisions.py", "imds_agent_v2.py"):
+    print(download(name))
+
+import py_compile
+py_compile.compile("imds_decisions.py", doraise=True)
+py_compile.compile("imds_agent_v2.py", doraise=True)
+print("compile OK")''',
+            "download-scripts",
+        ),
         code_cell(
             """# No IMDS login. Verifies green/amber/red scoring and writes fixture Excel + JSONL.
 !python imds_agent_v2.py --self-test""",

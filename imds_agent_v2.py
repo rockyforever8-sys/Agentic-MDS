@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from imds_decisions import (
+    ERROR_WARNING_RE,
     RULE_PACK_VERSION,
     decide_overall,
     env_flag,
@@ -75,8 +76,6 @@ XP_EXPAND_ALL = "//*[@id='pt1:dcIngr:ctbExpandAll']"
 XP_REJECT_REASON = (
     "//textarea[contains(@id,'Reject') or contains(@id,'reason') or contains(@id,'Reason')]"
 )
-
-ERROR_WARNING_BODY = re.compile(r"(\d+)\s*Error\(s\)\s*/\s*(\d+)\s*Warning\(s\)", re.I)
 
 REQUIRED_CLASSIFICATIONS = {
     "5.1.a",
@@ -600,7 +599,7 @@ def run_imds_check(page, cfg: Config) -> tuple[bool, str]:
     match = re.search(r"(The MDS has passed all included checks\.[^.]*\.)", body)
     if match:
         return True, match.group(1)
-    match = ERROR_WARNING_BODY.search(body)
+    match = ERROR_WARNING_RE.search(body)
     if match:
         return True, f"{match.group(1)} Error(s) / {match.group(2)} Warning(s)"
     return True, "Check result not found"
