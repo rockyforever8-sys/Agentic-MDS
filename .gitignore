@@ -1,1 +1,5 @@
 docs/demo-frames/
+imds_output/
+.env
+*.pyc
+__pycache__/
