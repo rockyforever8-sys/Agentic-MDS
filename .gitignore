@@ -1,5 +1,6 @@
 docs/demo-frames/
 imds_output/
+imds_output_selftest/
 .env
 *.pyc
 __pycache__/
