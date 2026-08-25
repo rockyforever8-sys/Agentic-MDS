@@ -33,6 +33,10 @@ Speaker notes are timed on every slide.
 
 Put `IMDS_USERNAME`, `IMDS_PASSWORD`, `OTP_SECRET`, and `IMDS_MASTER_KEY` in Colab Secrets. They are private to your Google account. The notebook encrypts a vault to Drive `MyDrive/imds_private/credentials.enc` (gitignored).
 
+Where to click (key icon in the left sidebar):
+
+![Colab Secrets: click the key icon in the left sidebar](docs/colab-secrets-guide.png)
+
 ```bash
 python -m unittest discover -s tests -v
 python imds_agent_v2.py --self-test   # no IMDS login
