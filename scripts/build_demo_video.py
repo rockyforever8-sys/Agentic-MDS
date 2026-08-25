@@ -37,12 +37,35 @@ def font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
+def _step_key(path: Path) -> tuple:
+    stem = path.stem
+    num = 0
+    for i, ch in enumerate(stem):
+        if ch.isdigit():
+            j = i
+            while j < len(stem) and stem[j].isdigit():
+                j += 1
+            num = int(stem[i:j])
+            break
+    return (num, stem.lower())
+
+
+def step_label(path: Path) -> str:
+    stem = path.stem
+    # strip leading "12_" etc.
+    i = 0
+    while i < len(stem) and (stem[i].isdigit() or stem[i] == "_"):
+        i += 1
+    rest = stem[i:].replace("_", " ").strip()
+    return rest[:48] if rest else stem
+
+
 def list_steps() -> list[Path]:
     files = []
     for ext in ("*.png", "*.jpg", "*.jpeg", "*.PNG", "*.JPG"):
         files.extend(STEPS.glob(ext))
-    files = [p for p in files if p.name.lower() not in ("readme.md",)]
-    files.sort(key=lambda p: p.name.lower())
+    files = [p for p in files if p.name.lower() != "readme.md"]
+    files.sort(key=_step_key)
     return files
 
 
@@ -124,7 +147,7 @@ def main() -> int:
     for i, path in enumerate(steps, 1):
         raw = Image.open(path)
         framed = letterbox(raw)
-        framed = caption(framed, f"STEP  {i:02d}  /  {n:02d}", "Agentic MDS  ·  IMDS UI")
+        framed = caption(framed, f"STEP  {i:02d}  /  {n:02d}   ·   {step_label(path)}", "Agentic MDS  ·  IMDS UI")
         prepared.append(framed)
 
     seq = []

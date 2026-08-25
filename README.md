@@ -4,7 +4,8 @@ Internal executive briefing on an internally built agentic workflow for IMDS MDS
 
 ## Presentation
 
-- **Live briefing:** https://cdn.jsdelivr.net/gh/rockyforever8-sys/Agentic-MDS@9cf8214/docs/index.html
+- **UI demo video (45s):** [presentations/IMDS_Agentic_Workflow_Demo.mp4](presentations/IMDS_Agentic_Workflow_Demo.mp4)
+- **Live briefing:** https://cdn.jsdelivr.net/gh/rockyforever8-sys/Agentic-MDS@cursor/imds-powerpoint-presentation-07ca/docs/index.html
 - **GitHub Pages (after enable):** https://rockyforever8-sys.github.io/Agentic-MDS/
 - **PowerPoint:** [presentations/IMDS_Agentic_Workflow.pptx](presentations/IMDS_Agentic_Workflow.pptx) or [docs/IMDS_Agentic_Workflow.pptx](docs/IMDS_Agentic_Workflow.pptx)
 - **PDF:** [docs/IMDS_Agentic_Workflow.pdf](docs/IMDS_Agentic_Workflow.pdf)
@@ -28,4 +29,5 @@ Speaker notes are timed on every slide.
 ```bash
 pip install -r requirements.txt
 python scripts/build_imds_presentation.py
+python scripts/build_demo_video.py   # needs ffmpeg; screenshots in docs/demo-steps/
 ```
