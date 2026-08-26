@@ -65,7 +65,7 @@ Set secrets **once** in Colab 🔑 (left sidebar). They stay in your Google acco
 
 The agent also writes an encrypted vault to Google Drive `MyDrive/imds_private/credentials.enc` if Drive is mounted, otherwise `~/.imds/credentials.enc`. That file is gitignored.
 
-Then click **Run IMDS until complete**. It processes 10 MDS: **PASS → accept + forward + propose**, **FAIL or amber → reject**, and writes `imds_output/mds_status_report.csv` by MDS ID.""",
+Then click **Run IMDS until complete**. Playwright runs in a subprocess because Colab already has an asyncio loop. It processes 10 MDS: **PASS → accept + forward + propose**, **FAIL or amber → reject**, and writes `imds_output/mds_status_report.csv` by MDS ID.""",
             "md-intro",
         ),
         code_cell(
@@ -84,6 +84,7 @@ Then click **Run IMDS until complete**. It processes 10 MDS: **PASS → accept +
         ),
         code_cell(
             '''# ONE BUTTON: load private secrets, run until complete, show accept/reject report.
+# Playwright Sync API cannot start in Colab's asyncio loop; the button runs a subprocess.
 import os
 from pathlib import Path
 from IPython.display import display
@@ -136,8 +137,23 @@ def _on_run(_):
                 "Private secrets missing: " + ", ".join(missing) +
                 ". Add IMDS_USERNAME, IMDS_PASSWORD, OTP_SECRET, and IMDS_MASTER_KEY in Colab Secrets."
             )
-        from imds_agent_v2 import orchestrate
-        rc = orchestrate()
+        # Playwright Sync API cannot start inside Colab's running asyncio loop.
+        # Run the agent in a child process and stream logs into this widget.
+        import subprocess, sys
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "imds_agent_v2.py"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            bufsize=1,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            print(line, end="")
+        rc = proc.wait()
         print("exit code", rc)
         report = Path("imds_output/mds_status_report.csv")
         if report.exists():

@@ -15,10 +15,12 @@ Does not log into IMDS during --self-test.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -41,6 +43,10 @@ try:
     nest_asyncio.apply()
 except ImportError:
     pass
+
+# nest_asyncio does not disable Playwright's own running-loop check. Jupyter and
+# Google Colab already have an asyncio loop, so sync_playwright() must run in a
+# child process (see orchestrate()).
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1169,7 +1175,49 @@ def process_rows_and_export(page, cfg: Config) -> list[dict]:
     return results
 
 
-def orchestrate() -> int:
+def _asyncio_loop_is_running() -> bool:
+    """True inside Jupyter/Colab (and any other running asyncio loop)."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def _orchestrate_in_subprocess() -> int:
+    """Run this file in a child process so Playwright Sync API can start.
+
+    Playwright raises:
+      "It looks like you are using Playwright Sync API inside the asyncio loop"
+    when sync_playwright() is called from a Colab/ipywidgets click handler.
+    """
+    script = Path(__file__).resolve()
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env["IMDS_INSIDE_ORCHESTRATE_SUBPROCESS"] = "1"
+    log.info(
+        "Colab/Jupyter asyncio loop is running — Playwright Sync API cannot start "
+        "in this process. Launching %s in a subprocess.",
+        script.name,
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-u", str(script)],
+        cwd=str(script.parent),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        print(line, end="")
+        sys.stdout.flush()
+    rc = proc.wait()
+    return int(rc if rc is not None else 1)
+
+
+def _orchestrate_live() -> int:
     cfg = load_config()
     if kill_is_on(cfg):
         log.error("Kill switch is on (IMDS_KILL_SWITCH or %s). Not starting.", cfg.output_dir / "KILL")
@@ -1201,6 +1249,20 @@ def orchestrate() -> int:
             return 1
         finally:
             browser.close()
+
+
+def orchestrate() -> int:
+    """Live IMDS session. Safe to call from Colab's green button.
+
+    If the current process already has a running asyncio loop (Jupyter/Colab),
+    Playwright Sync API cannot start here. The agent is launched as
+    `python -u imds_agent_v2.py` in a child process instead.
+    """
+    if os.environ.get("IMDS_INSIDE_ORCHESTRATE_SUBPROCESS") == "1":
+        return _orchestrate_live()
+    if _asyncio_loop_is_running():
+        return _orchestrate_in_subprocess()
+    return _orchestrate_live()
 
 
 def _write_fixture_excel(output_dir: Path) -> Path:
