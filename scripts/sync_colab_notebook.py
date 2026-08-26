@@ -65,12 +65,14 @@ Set secrets **once** in Colab 🔑 (left sidebar). They stay in your Google acco
 
 The agent also writes an encrypted vault to Google Drive `MyDrive/imds_private/credentials.enc` if Drive is mounted, otherwise `~/.imds/credentials.enc`. That file is gitignored.
 
-Then click **Run IMDS until complete**. Playwright runs in a subprocess because Colab already has an asyncio loop. It processes 10 MDS: **PASS → accept + forward + propose**, **FAIL or amber → reject**, and writes `imds_output/mds_status_report.csv` by MDS ID.""",
+Then click **Run IMDS until complete**. Playwright runs in a subprocess because Colab already has an asyncio loop. Cell 1 must run `playwright install-deps` so Chromium can find `libatk`. It processes 10 MDS: **PASS → accept + forward + propose**, **FAIL or amber → reject**, and writes `imds_output/mds_status_report.csv` by MDS ID.""",
             "md-intro",
         ),
         code_cell(
             "%pip install playwright openpyxl nest_asyncio pyotp cryptography ipywidgets\n"
-            "!playwright install --with-deps chromium",
+            "# Colab does not ship libatk. install-deps installs the OS libraries Chromium needs.\n"
+            "!python -m playwright install-deps chromium\n"
+            "!python -m playwright install chromium",
             "install",
         ),
         code_cell("%%writefile imds_decisions.py\n" + texts["imds_decisions.py"].rstrip() + "\n", "write-decisions"),

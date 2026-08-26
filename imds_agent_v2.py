@@ -48,6 +48,46 @@ except ImportError:
 # Google Colab already have an asyncio loop, so sync_playwright() must run in a
 # child process (see orchestrate()).
 
+# Chromium also needs OS libraries (libatk-1.0.so.0, …) that a bare Colab VM
+# does not ship. `playwright install chromium` is not enough; see
+# ensure_chromium_os_deps().
+CHROMIUM_LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
+LIBATK_CANDIDATES = (
+    Path("/usr/lib/x86_64-linux-gnu/libatk-1.0.so.0"),
+    Path("/usr/lib/aarch64-linux-gnu/libatk-1.0.so.0"),
+    Path("/lib/x86_64-linux-gnu/libatk-1.0.so.0"),
+    Path("/lib/aarch64-linux-gnu/libatk-1.0.so.0"),
+)
+CHROMIUM_APT_PACKAGES = (
+    "libatk1.0-0t64",
+    "libatk1.0-0",
+    "libatk-bridge2.0-0t64",
+    "libatk-bridge2.0-0",
+    "libcups2t64",
+    "libcups2",
+    "libdrm2",
+    "libxkbcommon0",
+    "libxcomposite1",
+    "libxdamage1",
+    "libxfixes3",
+    "libxrandr2",
+    "libgbm1",
+    "libasound2t64",
+    "libasound2",
+    "libnss3",
+    "libnspr4",
+    "libpango-1.0-0",
+    "libcairo2",
+    "libatspi2.0-0t64",
+    "libatspi2.0-0",
+    "libx11-xcb1",
+    "libxshmfence1",
+    "libxcursor1",
+    "libgtk-3-0t64",
+    "libgtk-3-0",
+    "fonts-liberation",
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -1217,6 +1257,96 @@ def _orchestrate_in_subprocess() -> int:
     return int(rc if rc is not None else 1)
 
 
+def libatk_present() -> bool:
+    return any(path.exists() for path in LIBATK_CANDIDATES)
+
+
+def _looks_like_missing_chromium_lib(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(
+        needle in text
+        for needle in (
+            "shared libraries",
+            "libatk",
+            "cannot open shared object",
+            "target page, context or browser has been closed",
+            "targetclosederror",
+        )
+    )
+
+
+def ensure_chromium_os_deps() -> None:
+    """Install libatk and friends. Colab's `playwright install chromium` skips these."""
+    if os.environ.get("IMDS_SKIP_BROWSER_DEPS") == "1":
+        return
+    if libatk_present():
+        return
+    log.info("Chromium OS libraries missing (libatk-1.0.so.0). Installing Playwright deps...")
+    env = os.environ.copy()
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+    subprocess.run(
+        [sys.executable, "-m", "playwright", "install-deps", "chromium"],
+        env=env,
+        check=False,
+    )
+    if libatk_present():
+        log.info("Playwright install-deps provided libatk.")
+        return
+    subprocess.run(["apt-get", "update", "-qq"], env=env, check=False)
+    t64 = [pkg for pkg in CHROMIUM_APT_PACKAGES if pkg.endswith("t64")]
+    legacy = [pkg for pkg in CHROMIUM_APT_PACKAGES if not pkg.endswith("t64")]
+    for batch in (t64, legacy):
+        subprocess.run(
+            ["apt-get", "install", "-y", "-qq", "--no-install-recommends", *batch],
+            env=env,
+            check=False,
+        )
+        if libatk_present():
+            log.info("apt installed libatk.")
+            return
+    log.error(
+        "Still missing libatk-1.0.so.0. In Colab run: "
+        "!python -m playwright install-deps chromium"
+    )
+
+
+def _launch_chromium(playwright, cfg):
+    ensure_chromium_os_deps()
+    kwargs = {"headless": cfg.headless, "args": list(CHROMIUM_LAUNCH_ARGS)}
+    try:
+        return playwright.chromium.launch(**kwargs)
+    except Exception as exc:
+        if not _looks_like_missing_chromium_lib(exc):
+            raise
+        log.warning("Chromium launch failed (%s). Installing OS deps and retrying once.", exc)
+        os.environ.pop("IMDS_SKIP_BROWSER_DEPS", None)
+        env = os.environ.copy()
+        env["DEBIAN_FRONTEND"] = "noninteractive"
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install-deps", "chromium"],
+            env=env,
+            check=False,
+        )
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            env=env,
+            check=False,
+        )
+        if not libatk_present():
+            subprocess.run(["apt-get", "update", "-qq"], env=env, check=False)
+            t64 = [pkg for pkg in CHROMIUM_APT_PACKAGES if pkg.endswith("t64")]
+            legacy = [pkg for pkg in CHROMIUM_APT_PACKAGES if not pkg.endswith("t64")]
+            for batch in (t64, legacy):
+                subprocess.run(
+                    ["apt-get", "install", "-y", "-qq", "--no-install-recommends", *batch],
+                    env=env,
+                    check=False,
+                )
+                if libatk_present():
+                    break
+        return playwright.chromium.launch(**kwargs)
+
+
 def _orchestrate_live() -> int:
     cfg = load_config()
     if kill_is_on(cfg):
@@ -1232,23 +1362,32 @@ def _orchestrate_live() -> int:
 
     from playwright.sync_api import sync_playwright
 
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=cfg.headless)
-        page = browser.new_page()
-        try:
-            imds_login(page, cfg)
-            if not navigate_to_search_page(page, cfg):
-                raise RuntimeError("Could not open Received MDSs search")
-            apply_not_yet_browsed_filter(page, cfg)
-            process_rows_and_export(page, cfg)
-            log.info("All done.")
-            return 0
-        except Exception as exc:
-            log.error("Script failed: %s", exc)
-            save_screenshot(page, cfg, "error.png", important=True)
-            return 1
-        finally:
-            browser.close()
+    try:
+        with sync_playwright() as playwright:
+            browser = _launch_chromium(playwright, cfg)
+            page = browser.new_page()
+            try:
+                imds_login(page, cfg)
+                if not navigate_to_search_page(page, cfg):
+                    raise RuntimeError("Could not open Received MDSs search")
+                apply_not_yet_browsed_filter(page, cfg)
+                process_rows_and_export(page, cfg)
+                log.info("All done.")
+                return 0
+            except Exception as exc:
+                log.error("Script failed: %s", exc)
+                save_screenshot(page, cfg, "error.png", important=True)
+                return 1
+            finally:
+                browser.close()
+    except Exception as exc:
+        log.error("Could not start Chromium: %s", exc)
+        if _looks_like_missing_chromium_lib(exc) or not libatk_present():
+            log.error(
+                "Colab is missing Chromium OS libraries (often libatk-1.0.so.0). "
+                "Re-run Cell 1, or run: !python -m playwright install-deps chromium"
+            )
+        return 1
 
 
 def orchestrate() -> int:
@@ -1342,6 +1481,7 @@ def run_self_test(tmp_dir: str | None = None) -> int:
     output.mkdir(parents=True, exist_ok=True)
 
     os.environ["IMDS_SKIP_VAULT"] = "1"
+    os.environ["IMDS_SKIP_BROWSER_DEPS"] = "1"
     os.environ["IMDS_VAULT_PATH"] = str(output / "no-vault.enc")
     # Config fail-fast without secrets
     saved = {k: os.environ.pop(k, None) for k in ("IMDS_USERNAME", "IMDS_PASSWORD", "OTP_SECRET")}

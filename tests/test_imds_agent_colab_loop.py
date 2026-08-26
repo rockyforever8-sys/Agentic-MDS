@@ -71,5 +71,36 @@ class ColabLoopTests(unittest.TestCase):
         self.assertEqual(env["PYTHONUNBUFFERED"], "1")
 
 
+    def test_ensure_skip_flag_does_not_apt(self):
+        os.environ["IMDS_SKIP_BROWSER_DEPS"] = "1"
+        try:
+            with patch.object(imds_agent_v2, "libatk_present", return_value=False):
+                with patch("imds_agent_v2.subprocess.run") as run:
+                    imds_agent_v2.ensure_chromium_os_deps()
+                    run.assert_not_called()
+        finally:
+            os.environ.pop("IMDS_SKIP_BROWSER_DEPS", None)
+
+    def test_ensure_skips_when_libatk_present(self):
+        os.environ.pop("IMDS_SKIP_BROWSER_DEPS", None)
+        with patch.object(imds_agent_v2, "libatk_present", return_value=True):
+            with patch("imds_agent_v2.subprocess.run") as run:
+                imds_agent_v2.ensure_chromium_os_deps()
+                run.assert_not_called()
+
+    def test_looks_like_missing_libatk_message(self):
+        self.assertTrue(
+            imds_agent_v2._looks_like_missing_chromium_lib(
+                RuntimeError("error while loading shared libraries: libatk-1.0.so.0")
+            )
+        )
+        self.assertTrue(
+            imds_agent_v2._looks_like_missing_chromium_lib(
+                RuntimeError("BrowserType.launch: Target page, context or browser has been closed")
+            )
+        )
+        self.assertFalse(imds_agent_v2._looks_like_missing_chromium_lib(RuntimeError("timeout")))
+
+
 if __name__ == "__main__":
     unittest.main()

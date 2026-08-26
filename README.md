@@ -34,7 +34,9 @@ Speaker notes are timed on every slide.
 
 Put `IMDS_USERNAME`, `IMDS_PASSWORD`, `OTP_SECRET`, and `IMDS_MASTER_KEY` in Colab Secrets. They are private to your Google account. The notebook encrypts a vault to Drive `MyDrive/imds_private/credentials.enc` (gitignored).
 
-Colab already has an asyncio event loop, so Playwright’s **sync** API cannot start in the notebook process (`Please use the Async API instead`). The green button and `orchestrate()` launch `python -u imds_agent_v2.py` in a **subprocess**. Re-run Cell 1 if this runtime cloned the repo before that fix.
+Colab already has an asyncio event loop, so Playwright’s **sync** API cannot start in the notebook process (`Please use the Async API instead`). The green button and `orchestrate()` launch `python -u imds_agent_v2.py` in a **subprocess**.
+
+Colab also does not ship Chromium OS libraries. Cell 1 runs `python -m playwright install-deps chromium` (not only `install chromium`). Without that, launch fails with `libatk-1.0.so.0: cannot open shared object file`. Re-run Cell 1 if this runtime cloned or installed before that fix.
 
 Where to click (key icon in the left sidebar):
 
