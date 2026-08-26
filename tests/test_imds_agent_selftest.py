@@ -27,6 +27,9 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertIn("def accept_passed_mds", text)
         self.assertIn("def reject_failed_mds", text)
         self.assertIn("a:has-text('Login'):visible", text)
+        self.assertIn("Clicked No on previous-version forward prompt", text)
+        self.assertIn("not clicking Ingredients on the leftover sheet", text)
+        self.assertNotIn("Looking for Yes button.", text)
 
     def test_load_live_credentials_requires_secrets(self):
         saved = {k: os.environ.pop(k, None) for k in ("IMDS_USERNAME", "IMDS_PASSWORD", "OTP_SECRET", "IMDS_MASTER_KEY")}
@@ -42,6 +45,23 @@ class OriginalAgentTests(unittest.TestCase):
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+
+
+class ForwardPromptHelpers(unittest.TestCase):
+    def test_detects_previous_version_forward_prompt(self):
+        text = (
+            "You just accepted an MDS where the previous version 1521938290 / 2 "
+            "has been forwarded. Do you want to forward the new version as well?"
+        )
+        self.assertTrue(imds_agent_v2.is_forward_previous_version_prompt(text))
+        self.assertFalse(imds_agent_v2.is_forward_previous_version_prompt("Clicked Inbox button"))
+        self.assertFalse(imds_agent_v2.is_forward_previous_version_prompt("Forward menu"))
+
+    def test_mds_id_matches_rejects_leftover_own_mds(self):
+        self.assertTrue(imds_agent_v2.mds_id_matches("1521938290 / 1", "1521938290"))
+        self.assertFalse(imds_agent_v2.mds_id_matches("1522107776 / 1.01", "1521938290"))
+        self.assertFalse(imds_agent_v2.mds_id_matches("1522107776 / 1.01", "1430442417"))
+        self.assertEqual(imds_agent_v2.parse_mds_id_number("1522107776 / 1.01"), "1522107776")
 
 
 if __name__ == "__main__":

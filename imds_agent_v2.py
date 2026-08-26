@@ -6,7 +6,8 @@ and rejection of failed MDSs.
 Enhanced with explicit XPaths and robust Company ID detection using frame_locator.
 Overall Result ignores Parts Marking Check per user request.
 Acceptance phase uses filter "Browsed" only.
-Fixed: forward confirmation modal handling.
+Fixed: previous-version forward prompt must be dismissed with No (Yes
+creates a new own-MDS ID and breaks later search/reject).
 """
 
 import os
@@ -206,6 +207,40 @@ XP_COMPANY_ID_EXACT = [
 # ---------- XPaths for filter in acceptance phase ----------
 XP_FILTER_NONE = "//*[@id='pt1:dcCmds:sfIbLU:cbNone']/a"
 XP_FILTER_BROWSED = "//*[@id='pt1:dcCmds:sfIbLU:sbcBrowsed::content']"
+# Previous-version forward prompt: Yes auto-forwards and mints a new own-MDS ID.
+XP_MODAL_NO = [
+    "//*[@id='pt1:pt_dcud:ctbNo']/a",
+    "//*[@id='pt1:pt_dcud:ctbNo']/a/span",
+    "//*[@id='pt1:pt_dcud:ctbNo']",
+    "//*[contains(@id,'ctbNo')]/a",
+]
+
+
+def is_forward_previous_version_prompt(text: str) -> bool:
+    """True for IMDS 'previous version has been forwarded — forward new version too?'."""
+    t = " ".join((text or "").lower().split())
+    if "forward the new version" in t or "do you want to forward the new version" in t:
+        return True
+    if "you just accepted" in t and "forward" in t:
+        return True
+    if "has been forwarded" in t and ("previous version" in t or "new version" in t):
+        return True
+    return False
+
+
+def mds_id_matches(visible: str | None, expected: str | None) -> bool:
+    if not expected or not visible or visible == "EXTRACTION_FAILED":
+        return False
+    expected = str(expected).strip()
+    compact = visible.replace(" ", "")
+    return expected in compact or expected in visible
+
+
+def parse_mds_id_number(visible: str | None) -> str:
+    if not visible:
+        return ""
+    match = re.search(r"(\d{7,})", str(visible))
+    return match.group(1) if match else ""
 
 def get_otp():
     return pyotp.TOTP(OTP_SECRET.replace(" ", "").upper()).now()
@@ -305,21 +340,119 @@ def imds_login(page):
     save_screenshot(page, "01_after_login.png")
 
 # ---------- Dismiss Modal ----------
-def dismiss_modal(page):
+def visible_dialog_text(page) -> str:
+    for sel in (".AFModalDialog", "[id*='pt_dcud']", ".p_AFModal"):
+        try:
+            loc = page.locator(sel)
+            if loc.count() > 0:
+                text = loc.first.inner_text(timeout=500)
+                if text and text.strip():
+                    return text
+        except Exception:
+            continue
+    try:
+        return page.locator("body").inner_text(timeout=500)[:8000]
+    except Exception:
+        return ""
+
+
+def _click_first_matching(page, selectors) -> str | None:
+    for selector in selectors:
+        try:
+            if selector.startswith("//") or selector.startswith("xpath="):
+                xp = selector[6:] if selector.startswith("xpath=") else selector
+                btn = page.locator(f"xpath={xp}").first
+            else:
+                btn = page.locator(selector).first
+            if btn.count() > 0 and btn.is_visible():
+                btn.click(force=True, timeout=4000)
+                return selector
+        except Exception:
+            continue
+    return None
+
+
+def click_forward_prompt_no(page) -> bool:
+    no_selectors = list(XP_MODAL_NO) + [
+        "button:has-text('No'):visible",
+        "input[value='No']:visible",
+        "a:has-text('No'):visible",
+        "span:has-text('No'):visible",
+    ]
+    used = _click_first_matching(page, no_selectors)
+    if not used:
+        return False
+    log.info(f"Clicked No on previous-version forward prompt via {used}")
+    page.wait_for_timeout(1500)
+    try:
+        page.wait_for_selector(".AFModalGlassPane", state="detached", timeout=8000)
+    except Exception:
+        pass
+    return True
+
+
+def wait_for_glass_pane_clear(page, timeout_ms: int = 8000, allow_escape: bool = True) -> bool:
+    """Dismiss leftover IMDS dialogs so they cannot intercept later clicks."""
+    deadline = time.time() + timeout_ms / 1000.0
+    while time.time() < deadline:
+        glass = page.locator(".AFModalGlassPane")
+        try:
+            visible = glass.count() > 0 and glass.first.is_visible()
+        except Exception:
+            visible = False
+        if not visible:
+            return True
+        dismiss_modal(page, allow_escape=allow_escape)
+        page.wait_for_timeout(400)
+    try:
+        glass = page.locator(".AFModalGlassPane")
+        return glass.count() == 0 or not glass.first.is_visible()
+    except Exception:
+        return True
+
+
+def read_visible_mds_id(page) -> str | None:
+    """Read ID / Version without a long wait — leftover MDS would otherwise look 'ready'."""
+    try:
+        label = page.locator("td:has-text('ID / Version')")
+        if label.count() == 0:
+            return None
+        cell = label.first
+        if not cell.is_visible():
+            return None
+        next_cell = cell.locator("xpath=following-sibling::td")
+        if next_cell.count() == 0:
+            return None
+        val = next_cell.first.text_content()
+        if val and val.strip():
+            return val.strip()
+    except Exception:
+        return None
+    return None
+
+
+def dismiss_modal(page, allow_escape: bool = True):
     log.info("Attempting to dismiss modal...")
     glass = page.locator(".AFModalGlassPane")
     if glass.count() == 0 or not glass.is_visible():
         log.info("No glass pane, no modal.")
         return True
     log.info("Modal glass pane detected.")
+    dialog_text = visible_dialog_text(page)
+    if is_forward_previous_version_prompt(dialog_text) or (
+        yes_no_buttons_visible(page) and "forward" in (dialog_text or "").lower()
+    ):
+        log.info("Forward-previous-version prompt is showing; clicking No (not Yes).")
+        if click_forward_prompt_no(page):
+            return True
+        log.warning("Could not click No; leaving the prompt in place rather than clicking Yes.")
+        return False
 
     for selector in [
         "#pt1\\:pt_dcud\\:ctbOk",
         "#pt1\\:pt_dcud\\:ctbOk > a > span",
         "button:has-text('OK'):visible",
         "input[value='OK']:visible",
-        "button:has-text('Yes'):visible",
-        "input[value='Yes']:visible",
         "button:has-text('Close'):visible",
         "input[value='Close']:visible",
         "button:has-text('Proceed'):visible",
@@ -344,14 +477,15 @@ def dismiss_modal(page):
     except:
         pass
 
-    try:
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(500)
-        if glass.count() == 0 or not glass.is_visible():
-            log.info("Pressed Escape, modal dismissed.")
-            return True
-    except:
-        pass
+    if allow_escape:
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(500)
+            if glass.count() == 0 or not glass.is_visible():
+                log.info("Pressed Escape, modal dismissed.")
+                return True
+        except:
+            pass
 
     try:
         page.evaluate("""
@@ -1017,62 +1151,57 @@ def is_check_clean(result_msg):
         return True
     return False
 
-# ---------- Handle Forward Confirmation Modal (improved) ----------
+# ---------- Handle Forward Confirmation Modal ----------
+def yes_no_buttons_visible(page) -> bool:
+    try:
+        no_btn = page.locator("#pt1\\:pt_dcud\\:ctbNo").first
+        yes_btn = page.locator("#pt1\\:pt_dcud\\:ctbYes").first
+        return (
+            no_btn.count() > 0 and no_btn.is_visible()
+            and yes_btn.count() > 0 and yes_btn.is_visible()
+        )
+    except Exception:
+        return False
+
+
 def handle_forward_confirmation_modal(page):
+    """Dismiss 'forward the new version as well?' with No.
+
+    Yes auto-forwards and opens a new own MDS (new ID). Later search/open/reject
+    then reads that leftover ID instead of the MDS we asked for.
+    Returns 'no' if we clicked No, None if no such prompt.
+    """
     log.info("Checking for forward confirmation modal...")
     try:
-        # Wait a moment for modal to appear
-        page.wait_for_timeout(1000)
-        # Look for glass pane indicating modal
-        glass = page.locator(".AFModalGlassPane")
-        if glass.count() > 0 and glass.is_visible():
-            log.info("Modal glass pane detected. Looking for Yes button.")
-            # Try various ways to click Yes
-            yes_selectors = [
-                "button:has-text('Yes'):visible",
-                "input[value='Yes']:visible",
-                "#pt1\\:pt_dcud\\:ctbYes",
-                "//*[contains(@id,'ctbYes')]",
-                "//*[contains(text(),'Yes')]",
-                "span:has-text('Yes'):visible",
-                "a:has-text('Yes'):visible"
-            ]
-            for selector in yes_selectors:
-                try:
-                    if selector.startswith("//"):
-                        btn = page.locator(f"xpath={selector}").first
-                    else:
-                        btn = page.locator(selector).first
-                    if btn.count() > 0 and btn.is_visible():
-                        btn.click(force=True)
-                        log.info(f"Clicked Yes via selector: {selector}")
-                        page.wait_for_timeout(2000)
-                        # Wait for modal to disappear
-                        page.wait_for_selector(".AFModalGlassPane", state="detached", timeout=5000)
-                        log.info("Forward confirmation modal dismissed.")
-                        return True
-                except Exception as e:
-                    log.debug(f"Selector {selector} failed: {e}")
-            # If Yes not found, try clicking glass pane or pressing Enter
+        empty_streak = 0
+        for _ in range(10):
+            glass = page.locator(".AFModalGlassPane")
+            glass_up = False
             try:
-                glass.click(force=True)
-                log.info("Clicked glass pane to dismiss modal.")
-                page.wait_for_timeout(2000)
-                return True
-            except:
-                pass
-            try:
-                page.keyboard.press("Enter")
-                log.info("Pressed Enter to dismiss modal.")
-                page.wait_for_timeout(2000)
-                return True
-            except:
-                pass
-        else:
-            log.info("No forward confirmation modal detected.")
+                glass_up = glass.count() > 0 and glass.is_visible()
+            except Exception:
+                glass_up = False
+            dialog_text = visible_dialog_text(page) if glass_up else ""
+            is_prompt = is_forward_previous_version_prompt(dialog_text) or yes_no_buttons_visible(page)
+            if glass_up and is_prompt:
+                log.info("Previous-version forward prompt detected. Clicking No to keep the original MDS ID.")
+                if click_forward_prompt_no(page):
+                    wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False)
+                    return "no"
+                log.warning("No button not found on forward confirmation; not clicking Yes.")
+                return None
+            page.wait_for_timeout(400)
+            if not glass_up:
+                empty_streak += 1
+                if empty_streak >= 5:
+                    break
+            else:
+                empty_streak = 0
+        log.info("No forward confirmation modal detected.")
+        return None
     except Exception as e:
         log.warning(f"Error handling forward confirmation modal: {e}")
-    return False
+    return None
 
 # ---------- Accept MDS ----------
 def accept_mds(page):
@@ -1868,18 +1997,25 @@ def complete_forward_recipients(page, supplier_code, part_no):
         except:
             log.warning("Iframe did not detach; dismissing modal.")
             dismiss_modal(page)
+        wait_for_glass_pane_clear(page, timeout_ms=8000)
 
         # 9. Fill Supplier Code and Part/Item No.
         if supplier_code and supplier_code.strip() not in ['', '-']:
             try:
                 supp_code_field = page.locator("xpath=//*[@id='pt1:dcReci:itSuppCode::content']")
                 if supp_code_field.count() > 0:
-                    supp_code_field.click()
+                    wait_for_glass_pane_clear(page, timeout_ms=4000)
+                    supp_code_field.click(force=True, timeout=8000)
                     supp_code_field.fill("")
                     supp_code_field.fill(supplier_code)
                     log.info(f"Filled Supplier Code: {supplier_code}")
             except Exception as e:
                 log.warning(f"Error filling Supplier Code: {e}")
+                try:
+                    page.locator("xpath=//*[@id='pt1:dcReci:itSuppCode::content']").fill(supplier_code, force=True, timeout=5000)
+                    log.info(f"Filled Supplier Code via force fill: {supplier_code}")
+                except Exception as e2:
+                    log.warning(f"Force fill Supplier Code also failed: {e2}")
         else:
             log.warning("No valid Supplier Code to fill.")
 
@@ -1887,17 +2023,25 @@ def complete_forward_recipients(page, supplier_code, part_no):
             try:
                 part_field = page.locator("xpath=//*[@id='pt1:dcReci:itprodCode::content']")
                 if part_field.count() > 0:
-                    part_field.click()
+                    wait_for_glass_pane_clear(page, timeout_ms=4000)
+                    part_field.click(force=True, timeout=8000)
                     part_field.fill("")
                     part_field.fill(part_no)
                     log.info(f"Filled Part/Item No.: {part_no}")
                     save_screenshot(page, f"after_fill_part_no_{company_id}.png")
             except Exception as e:
                 log.warning(f"Error filling Part/Item No.: {e}")
+                try:
+                    page.locator("xpath=//*[@id='pt1:dcReci:itprodCode::content']").fill(part_no, force=True, timeout=5000)
+                    log.info(f"Filled Part/Item No. via force fill: {part_no}")
+                    save_screenshot(page, f"after_fill_part_no_{company_id}.png")
+                except Exception as e2:
+                    log.warning(f"Force fill Part/Item No. also failed: {e2}")
         else:
             log.warning("No Part/Item No. to fill.")
 
         # 10. Click Propose
+        wait_for_glass_pane_clear(page, timeout_ms=5000)
         try:
             propose_btn = page.locator(f"xpath={XP_PROPOSE}")
             if propose_btn.count() == 0:
@@ -2070,8 +2214,45 @@ def click_ingredients_tab(page) -> bool:
 
 
 def wait_for_mds_content_page(page, expected_id: str | None = None) -> bool:
-    """Stay on the MDS Ingredients page (ID / Version + tree). MDS menu exists on search too, so do not use it as the ready signal."""
-    dismiss_modal(page)
+    """Stay on the MDS Ingredients page (ID / Version + tree).
+
+    Do not click Ingredients first when expected_id is set: that tab can still
+    show a leftover own MDS from a previous Yes-on-forward prompt.
+    MDS menu exists on search too, so do not use it as the ready signal.
+    """
+    dismiss_modal(page, allow_escape=False)
+    last_id = None
+    matched = expected_id is None
+    wrong_streak = 0
+    for i in range(24):
+        wait_for_glass_pane_clear(page, timeout_ms=1500, allow_escape=False)
+        last_id = read_visible_mds_id(page)
+        if expected_id:
+            if last_id and mds_id_matches(last_id, expected_id):
+                matched = True
+                break
+            if last_id and not mds_id_matches(last_id, expected_id):
+                wrong_streak += 1
+                if wrong_streak >= 8:
+                    log.warning(
+                        f"On-screen MDS {last_id} stayed different from expected {expected_id}; "
+                        "not clicking Ingredients on the leftover sheet."
+                    )
+                    break
+            else:
+                wrong_streak = 0
+        elif last_id:
+            matched = True
+            break
+        if i == 8 and not last_id:
+            click_ingredients_tab(page)
+        page.wait_for_timeout(500)
+
+    if expected_id and not matched:
+        log.warning(f"Opened MDS {last_id} does not match expected ID {expected_id}.")
+        save_screenshot(page, "mds_id_mismatch.png")
+        return False
+
     click_ingredients_tab(page)
     landmarks = [
         "td:has-text('ID / Version')",
@@ -2100,17 +2281,44 @@ def wait_for_mds_content_page(page, expected_id: str | None = None) -> bool:
         return False
     mds_id = extract_mds_id_version_early(page)
     log.info(f"MDS Ingredients page is open. ID/Version={mds_id}")
-    if expected_id and mds_id and mds_id != "EXTRACTION_FAILED":
-        compact = mds_id.replace(" ", "")
-        if expected_id not in compact and expected_id not in mds_id:
-            log.warning(f"Opened MDS {mds_id} does not match expected ID {expected_id}.")
-            save_screenshot(page, "mds_id_mismatch.png")
-            return False
+    if expected_id and not mds_id_matches(mds_id, expected_id):
+        log.warning(f"Opened MDS {mds_id} does not match expected ID {expected_id}.")
+        save_screenshot(page, "mds_id_mismatch.png")
+        return False
     return True
 
 
-def open_first_result_on_content_page(page, mds_id_num: str) -> bool:
-    """Double-click the first result name cell (same XPath family as scoring) and wait for Ingredients."""
+def search_mds_by_id(page, mds_id_num: str) -> bool:
+    """Return to Received MDSs search, filter Browsed, and search one ID."""
+    wait_for_glass_pane_clear(page, timeout_ms=5000)
+    if not navigate_to_search_page(page):
+        return False
+    wait_for_glass_pane_clear(page, timeout_ms=3000)
+    set_browsed_filter(page)
+    try:
+        id_input = page.locator(f"xpath={XP_ID_FIELD}")
+        id_input.click(force=True)
+        id_input.fill("")
+        id_input.fill(mds_id_num)
+        log.info(f"Filled ID field with {mds_id_num}")
+    except Exception as e:
+        log.warning(f"Failed to fill ID field: {e}.")
+        return False
+    try:
+        search_btn = page.locator(f"xpath={XP_SEARCH_BUTTON}")
+        search_btn.click(force=True)
+        log.info("Clicked Search button.")
+        page.wait_for_load_state("networkidle", timeout=15000)
+        page.wait_for_timeout(3000)
+        wait_for_glass_pane_clear(page, timeout_ms=3000)
+        return True
+    except Exception as e:
+        log.warning(f"Failed to click Search button: {e}.")
+        return False
+
+
+def _double_click_first_result(page, mds_id_num: str) -> bool:
+    wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False)
     name_cell = page.locator(f"xpath={XP_FIRST_RESULT_NAME}")
     row = None
     try:
@@ -2134,7 +2342,8 @@ def open_first_result_on_content_page(page, mds_id_num: str) -> bool:
         log.info(f"Double-clicked first result for {mds_id_num}")
         page.wait_for_load_state("networkidle", timeout=15000)
         page.wait_for_timeout(2000)
-        dismiss_modal(page)
+        wait_for_glass_pane_clear(page, timeout_ms=4000, allow_escape=False)
+        return True
     except Exception as e:
         log.warning(f"Double-click failed: {e}")
         try:
@@ -2142,29 +2351,35 @@ def open_first_result_on_content_page(page, mds_id_num: str) -> bool:
             page.keyboard.press("Enter")
             page.wait_for_load_state("networkidle", timeout=15000)
             page.wait_for_timeout(2000)
-            dismiss_modal(page)
+            wait_for_glass_pane_clear(page, timeout_ms=4000, allow_escape=False)
             log.info("Opened row via click + Enter fallback.")
+            return True
         except Exception as e2:
             log.warning(f"Could not open result row: {e2}")
             return False
 
-    if wait_for_mds_content_page(page, expected_id=mds_id_num):
-        save_screenshot(page, f"after_open_content_{mds_id_num}.png")
-        return True
-    log.warning("Retrying Ingredients tab after open.")
-    click_ingredients_tab(page)
-    page.wait_for_timeout(1500)
-    if wait_for_mds_content_page(page, expected_id=mds_id_num):
-        save_screenshot(page, f"after_open_content_{mds_id_num}.png")
-        return True
-    save_screenshot(page, f"after_doubleclick_{mds_id_num}.png")
+
+def open_first_result_on_content_page(page, mds_id_num: str) -> bool:
+    """Double-click the first result and wait until ID / Version matches that MDS."""
+    for attempt in range(1, 4):
+        if not _double_click_first_result(page, mds_id_num):
+            return False
+        if wait_for_mds_content_page(page, expected_id=mds_id_num):
+            save_screenshot(page, f"after_open_content_{mds_id_num}.png")
+            return True
+        log.warning(
+            f"Open attempt {attempt}/3 for {mds_id_num} showed a different MDS. "
+            "Returning to search instead of using leftover Ingredients."
+        )
+        save_screenshot(page, f"after_doubleclick_{mds_id_num}.png")
+        if attempt < 3:
+            if not search_mds_by_id(page, mds_id_num):
+                return False
     return False
 
 
 def accept_passed_mds(page, results):
     log.info("Starting acceptance of PASS MDSs using search-by-ID with exact XPaths...")
-    id_input_xpath = XP_ID_FIELD
-    search_btn_xpath = XP_SEARCH_BUTTON
 
     for idx, res in enumerate(results):
         if res.get("Overall Result") != "PASS":
@@ -2176,30 +2391,8 @@ def accept_passed_mds(page, results):
         part_no = res.get("Part/Item No.", "")
         log.info(f"Searching for MDS ID: {mds_id_num}")
 
-        if not navigate_to_search_page(page):
-            log.warning("Could not navigate to search page. Skipping remaining MDSs.")
-            break
-
-        set_browsed_filter(page)
-
-        try:
-            id_input = page.locator(f"xpath={id_input_xpath}")
-            id_input.click()
-            id_input.fill("")
-            id_input.fill(mds_id_num)
-            log.info(f"Filled ID field with {mds_id_num}")
-        except Exception as e:
-            log.warning(f"Failed to fill ID field: {e}. Skipping.")
-            continue
-
-        try:
-            search_btn = page.locator(f"xpath={search_btn_xpath}")
-            search_btn.click(force=True)
-            log.info("Clicked Search button.")
-            page.wait_for_load_state("networkidle", timeout=15000)
-            page.wait_for_timeout(3000)
-        except Exception as e:
-            log.warning(f"Failed to click Search button: {e}. Skipping.")
+        if not search_mds_by_id(page, mds_id_num):
+            log.warning(f"Could not search for MDS {mds_id_num}. Skipping this MDS.")
             continue
 
         if not open_first_result_on_content_page(page, mds_id_num):
@@ -2212,29 +2405,40 @@ def accept_passed_mds(page, results):
 
         handle_forward_confirmation_modal(page)
         page.wait_for_timeout(1500)
-        dismiss_modal(page)
-        if not wait_for_mds_content_page(page, expected_id=mds_id_num):
-            log.warning("Left Ingredients page after Accept; clicking Ingredients before Forward.")
+        wait_for_glass_pane_clear(page, timeout_ms=5000)
+        current_id = read_visible_mds_id(page) or extract_mds_id_version_early(page)
+        auto_forwarded = bool(current_id) and not mds_id_matches(current_id, mds_id_num)
+        if auto_forwarded:
+            new_id = parse_mds_id_number(current_id) or current_id
+            log.warning(
+                f"IMDS auto-forwarded after Accept; on-screen ID is {current_id} "
+                f"(searched {mds_id_num}). Skipping a second Forward and proposing on {new_id}."
+            )
             click_ingredients_tab(page)
-            wait_for_mds_content_page(page, expected_id=mds_id_num)
-
-        if not forward_mds(page):
-            log.warning("Forwarding failed; still attempting recipient/propose on the open MDS.")
         else:
-            log.info("Forward successful.")
+            if not wait_for_mds_content_page(page, expected_id=mds_id_num):
+                log.warning("Left Ingredients page after Accept; clicking Ingredients before Forward.")
+                click_ingredients_tab(page)
+                wait_for_mds_content_page(page, expected_id=mds_id_num)
+            if not forward_mds(page):
+                log.warning("Forwarding failed; still attempting recipient/propose on the open MDS.")
+            else:
+                log.info("Forward successful.")
 
         if not complete_forward_recipients(page, supplier_code, part_no):
             log.warning("Recipient assignment incomplete.")
         else:
             log.info("Recipient assignment successful.")
 
+        if not navigate_to_search_page(page):
+            log.warning("Could not return to Received MDSs search after propose; leftover MDS may remain open.")
+        wait_for_glass_pane_clear(page, timeout_ms=4000)
+
     log.info("Acceptance, forwarding, and recipient assignment completed.")
 
 # ---------- Process FAIL MDSs ----------
 def reject_failed_mds(page, results):
     log.info("Starting rejection of FAIL MDSs using search-by-ID...")
-    id_input_xpath = XP_ID_FIELD
-    search_btn_xpath = XP_SEARCH_BUTTON
 
     for idx, res in enumerate(results):
         if res.get("Overall Result") != "FAIL":
@@ -2244,30 +2448,8 @@ def reject_failed_mds(page, results):
         mds_id_num = res["MDS ID / Version"].split('/')[0].strip()
         log.info(f"Rejecting MDS ID: {mds_id_num}")
 
-        if not navigate_to_search_page(page):
-            log.warning("Could not navigate to search page. Skipping remaining MDSs.")
-            break
-
-        set_browsed_filter(page)
-
-        try:
-            id_input = page.locator(f"xpath={id_input_xpath}")
-            id_input.click()
-            id_input.fill("")
-            id_input.fill(mds_id_num)
-            log.info(f"Filled ID field with {mds_id_num}")
-        except Exception as e:
-            log.warning(f"Failed to fill ID field: {e}. Skipping.")
-            continue
-
-        try:
-            search_btn = page.locator(f"xpath={search_btn_xpath}")
-            search_btn.click(force=True)
-            log.info("Clicked Search button.")
-            page.wait_for_load_state("networkidle", timeout=15000)
-            page.wait_for_timeout(3000)
-        except Exception as e:
-            log.warning(f"Failed to click Search button: {e}. Skipping.")
+        if not search_mds_by_id(page, mds_id_num):
+            log.warning(f"Could not search for MDS {mds_id_num}. Skipping this MDS.")
             continue
 
         if not open_first_result_on_content_page(page, mds_id_num):
@@ -2278,6 +2460,10 @@ def reject_failed_mds(page, results):
             log.warning(f"Rejection failed for MDS {mds_id_num}.")
         else:
             log.info(f"Successfully rejected MDS {mds_id_num}.")
+
+        if not navigate_to_search_page(page):
+            log.warning("Could not return to Received MDSs search after reject.")
+        wait_for_glass_pane_clear(page, timeout_ms=4000)
 
     log.info("Rejection of FAIL MDSs completed.")
 
