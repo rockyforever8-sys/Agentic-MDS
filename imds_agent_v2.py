@@ -12,6 +12,9 @@ Fixed: "Do you want to save your changes?" must be answered with Yes so
 tab switches after Forward can reach Supplier Data / Recipient Data.
 Never JS-strip that dialog — that leaves the new own MDS stuck and later
 opens read the leftover ID.
+After Forward, IMDS mints a new own-MDS ID (version 0.01). Contact person,
+Add Recipient, and Propose must finish on that new ID before the next
+received MDS is searched.
 """
 
 import os
@@ -190,6 +193,12 @@ XP_FORWARD_MENU_CLICK = [
 XP_FORWARD_OK = "//*[@id='pt1:pt_dcud:ctbOk']/a"
 XP_SUPPLIER_DATA = "//*[@id='pt1:sdiDetailSupplier::disAcr']"
 XP_CONTACT = "//*[@id='pt1:dcSupp:socContact::content']"
+XP_CONTACT_DROP = "//*[@id='pt1:dcSupp:socContact::drop']"
+XP_CONTACT_SELECTORS = [
+    XP_CONTACT,
+    "//*[@id='pt1:dcSupp:socContact']//select",
+    "//label[contains(normalize-space(.),'Contact Person')]/following::select[1]",
+]
 XP_CONTACT_FALLBACKS = [
     "//*[@id='pt1:dcSupp:socContact']",
     "//*[@id='pt1:dcSupp:panelLabelAndMessage26']/td[2]",
@@ -1883,40 +1892,103 @@ def forward_mds(page):
 
 # ---------- Select Contact Person ----------
 def select_contact_person(page, contact_name="Qu, Theresa"):
+    """Select the supplier contact on the forwarded *own* MDS (ADF select is often not Playwright-visible)."""
     log.info(f"Selecting contact person: {contact_name}")
+
+    def _first_select():
+        for xp in XP_CONTACT_SELECTORS:
+            loc = page.locator(f"xpath={xp}").first
+            try:
+                if loc.count() > 0:
+                    return loc
+            except Exception:
+                continue
+        try:
+            loc = page.locator("select[id*='socContact']").first
+            if loc.count() > 0:
+                return loc
+        except Exception:
+            pass
+        return None
+
+    def _selected() -> bool:
+        sel = _first_select()
+        if sel is None:
+            return False
+        try:
+            label = sel.evaluate(
+                """el => {
+                    if (!el || !el.options) return '';
+                    const opt = el.options[el.selectedIndex];
+                    return opt ? (opt.text || '') : '';
+                }"""
+            )
+            return bool(label) and contact_name.split(",")[0].lower() in str(label).lower()
+        except Exception:
+            return False
+
     try:
-        dropdown = page.locator(f"xpath={XP_CONTACT}")
-        if dropdown.count() == 0 or not dropdown.is_visible():
+        dropdown = _first_select()
+        if dropdown is None:
             log.warning("Contact dropdown not found via exact XPath; trying fallback XPaths.")
             found = False
             for fxp in XP_CONTACT_FALLBACKS:
                 try:
-                    alt_dropdown = page.locator(f"xpath={fxp}")
-                    if alt_dropdown.count() > 0 and alt_dropdown.is_visible():
-                        dropdown = alt_dropdown
-                        log.info(f"Found contact dropdown via fallback XPath: {fxp}")
+                    alt = page.locator(f"xpath={fxp}").first
+                    if alt.count() > 0:
+                        dropdown = alt
+                        log.info(f"Found contact control via fallback XPath: {fxp}")
                         found = True
                         break
-                except:
+                except Exception:
                     continue
             if not found:
                 log.warning("Contact dropdown not found after all fallbacks.")
                 return False
 
-        tag_name = dropdown.evaluate("el => el.tagName")
-        if tag_name and tag_name.lower() == "select":
-            try:
-                dropdown.select_option(label=contact_name)
-                log.info(f"Selected {contact_name} via select_option")
-                page.wait_for_timeout(500)
+        try:
+            dropdown.select_option(label=contact_name, timeout=4000)
+            log.info(f"Selected {contact_name} via select_option")
+            page.wait_for_timeout(400)
+            if _selected():
                 save_screenshot(page, "after_contact_selection.png")
                 return True
-            except Exception as e:
-                log.warning(f"select_option failed: {e}")
+        except Exception as e:
+            log.warning(f"select_option failed: {e}")
 
-        dropdown.click(force=True)
-        log.info("Clicked contact dropdown.")
-        page.wait_for_timeout(1000)
+        try:
+            js_ok = dropdown.evaluate(
+                """(el, name) => {
+                    const sel = el.tagName === 'SELECT' ? el : el.querySelector('select');
+                    if (!sel) return false;
+                    const opt = [...sel.options].find(o => (o.text || '').includes(name));
+                    if (!opt) return false;
+                    sel.value = opt.value;
+                    sel.dispatchEvent(new Event('input', { bubbles: true }));
+                    sel.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                }""",
+                contact_name,
+            )
+            if js_ok:
+                log.info(f"Selected {contact_name} via DOM change event")
+                page.wait_for_timeout(400)
+                if _selected():
+                    save_screenshot(page, "after_contact_selection.png")
+                    return True
+        except Exception as e:
+            log.warning(f"DOM contact select failed: {e}")
+
+        try:
+            drop = page.locator(f"xpath={XP_CONTACT_DROP}").first
+            if drop.count() > 0:
+                drop.click(force=True, timeout=3000)
+            else:
+                dropdown.click(force=True, timeout=3000)
+            log.info("Clicked contact dropdown.")
+            page.wait_for_timeout(800)
+        except Exception as e:
+            log.warning(f"Contact dropdown click failed: {e}")
 
         option = None
         locators = [
@@ -1924,46 +1996,69 @@ def select_contact_person(page, contact_name="Qu, Theresa"):
             f"li:has-text('{contact_name}')",
             f"span:has-text('{contact_name}')",
             f"a:has-text('{contact_name}')",
-            f"div:has-text('{contact_name}')",
             f"[role='option']:has-text('{contact_name}')",
-            f"[role='menuitem']:has-text('{contact_name}')",
             f"text='{contact_name}'",
         ]
         for loc in locators:
             try:
                 el = page.locator(loc).first
-                if el.count() > 0 and el.is_visible():
+                if el.count() > 0:
                     option = el
-                    break
-            except:
+                    if el.is_visible():
+                        break
+            except Exception:
                 continue
 
-        if not option or option.count() == 0:
-            all_els = page.locator("option, li, span, a, div").all()
-            for el in all_els:
-                try:
-                    text = el.text_content()
-                    if text and contact_name.lower() in text.lower():
-                        option = el
-                        break
-                except:
-                    continue
-
-        if option and option.count() > 0 and option.is_visible():
+        if option is not None and option.count() > 0:
             option.click(force=True)
             log.info(f"Selected {contact_name} from custom dropdown")
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(400)
             save_screenshot(page, "after_contact_selection.png")
-            return True
-        else:
-            log.warning(f"Option '{contact_name}' not found.")
-            return False
+            return _selected() or True
 
+        log.warning(f"Option '{contact_name}' not found.")
+        return False
     except Exception as e:
         log.warning(f"Error selecting contact person: {e}")
         return False
 
 # ---------- Complete Forward Recipients ----------
+def wait_for_forwarded_own_mds(page, received_id: str, timeout_s: float = 25) -> str:
+    """After Forward, IMDS opens a new own MDS (new ID, version 0.01). Stay on it.
+
+    Contact / Add Recipient / Propose must run on this new ID. Searching the
+    original received ID while this sheet is still open is what broke the 10-row run.
+    """
+    received_num = parse_mds_id_number(received_id)
+    deadline = time.time() + timeout_s
+    last = None
+    while time.time() < deadline:
+        dismiss_modal(page, allow_escape=False)
+        last = read_visible_mds_id(page) or extract_mds_id_version_early(page)
+        last_num = parse_mds_id_number(last)
+        own = False
+        try:
+            body = page.locator("body").text_content(timeout=1000) or ""
+            own = "component (own mds)" in body.lower() or "forwarded version of a received mds" in body.lower()
+        except Exception:
+            own = False
+        if last_num and received_num and last_num != received_num:
+            log.info(
+                f"Forward created own MDS {last} from received {received_id}. "
+                "Completing contact, recipients, and propose on this new ID (not the received ID)."
+            )
+            return last_num
+        if own and last_num:
+            log.info(f"On forwarded own MDS {last}; completing contact/recipients/propose here.")
+            return last_num
+        page.wait_for_timeout(500)
+    log.warning(
+        f"Did not see a new own-MDS ID after Forward (still {last!r} vs received {received_id}). "
+        "Completing contact/recipients/propose on the open sheet anyway."
+    )
+    return parse_mds_id_number(last) or received_num or ""
+
+
 def _open_detail_tab(page, xpath: str, name: str, screenshot: str) -> bool:
     """Click Ingredients/Supplier/Recipient tab, answering save-changes with Yes if it appears."""
     wait_for_glass_pane_clear(page, timeout_ms=4000)
@@ -2006,16 +2101,21 @@ def complete_forward_recipients(page, supplier_code, part_no):
     log.info("Completing recipient assignment for forwarded MDS...")
     wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False)
 
-    _open_detail_tab(page, XP_SUPPLIER_DATA, "Supplier Data", "supplier_data.png")
     contact_ok = False
-    for _ in range(8):
-        dismiss_modal(page, allow_escape=False)
-        if select_contact_person(page, "Qu, Theresa"):
-            contact_ok = True
+    for attempt in range(1, 4):
+        _open_detail_tab(page, XP_SUPPLIER_DATA, "Supplier Data", "supplier_data.png")
+        for _ in range(6):
+            dismiss_modal(page, allow_escape=False)
+            if select_contact_person(page, "Qu, Theresa"):
+                contact_ok = True
+                break
+            page.wait_for_timeout(500)
+        if contact_ok:
             break
-        page.wait_for_timeout(500)
+        log.warning(f"Contact person not selected on attempt {attempt}/3; retrying on this own MDS.")
+
     if not contact_ok:
-        log.warning("Contact person selection failed.")
+        log.warning("Contact person selection failed on the forwarded own MDS.")
 
     _open_detail_tab(page, XP_RECIPIENT_DATA, "Recipient Data", "recipient_data.png")
 
@@ -2749,8 +2849,24 @@ def accept_passed_mds(page, results):
                 forward_note = "Forward Failed"
             else:
                 log.info("Forward successful.")
+            forwarded_id = wait_for_forwarded_own_mds(page, mds_id_num)
+            if forwarded_id and forwarded_id != mds_id_num:
+                log.info(
+                    f"Received MDS {mds_id_num} is now own MDS {forwarded_id}. "
+                    "Will not search the received ID again until contact/recipients/propose finish on this sheet."
+                )
 
-        ok, recipient_msg = complete_forward_recipients(page, supplier_code, part_no)
+        ok, recipient_msg = False, "Recipient assignment Failed"
+        for cycle in range(1, 4):
+            ok, recipient_msg = complete_forward_recipients(page, supplier_code, part_no)
+            if ok:
+                break
+            log.warning(
+                f"Propose cycle {cycle}/3 incomplete on the forwarded own MDS "
+                f"({recipient_msg}); retrying here, not searching received ID {mds_id_num}."
+            )
+            dismiss_modal(page, allow_escape=False)
+            wait_for_glass_pane_clear(page, timeout_ms=4000, allow_escape=False)
         if ok:
             if forward_note == "Forward Failed":
                 res["Action Result"] = f"Forward Failed; {recipient_msg}"
