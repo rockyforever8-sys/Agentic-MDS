@@ -15,10 +15,12 @@ Does not log into IMDS during --self-test.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import logging
 import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -41,6 +43,50 @@ try:
     nest_asyncio.apply()
 except ImportError:
     pass
+
+# nest_asyncio does not disable Playwright's own running-loop check. Jupyter and
+# Google Colab already have an asyncio loop, so sync_playwright() must run in a
+# child process (see orchestrate()).
+
+# Chromium also needs OS libraries (libatk-1.0.so.0, …) that a bare Colab VM
+# does not ship. `playwright install chromium` is not enough; see
+# ensure_chromium_os_deps().
+CHROMIUM_LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
+LIBATK_CANDIDATES = (
+    Path("/usr/lib/x86_64-linux-gnu/libatk-1.0.so.0"),
+    Path("/usr/lib/aarch64-linux-gnu/libatk-1.0.so.0"),
+    Path("/lib/x86_64-linux-gnu/libatk-1.0.so.0"),
+    Path("/lib/aarch64-linux-gnu/libatk-1.0.so.0"),
+)
+CHROMIUM_APT_PACKAGES = (
+    "libatk1.0-0t64",
+    "libatk1.0-0",
+    "libatk-bridge2.0-0t64",
+    "libatk-bridge2.0-0",
+    "libcups2t64",
+    "libcups2",
+    "libdrm2",
+    "libxkbcommon0",
+    "libxcomposite1",
+    "libxdamage1",
+    "libxfixes3",
+    "libxrandr2",
+    "libgbm1",
+    "libasound2t64",
+    "libasound2",
+    "libnss3",
+    "libnspr4",
+    "libpango-1.0-0",
+    "libcairo2",
+    "libatspi2.0-0t64",
+    "libatspi2.0-0",
+    "libx11-xcb1",
+    "libxshmfence1",
+    "libxcursor1",
+    "libgtk-3-0t64",
+    "libgtk-3-0",
+    "fonts-liberation",
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -204,18 +250,33 @@ def wait_ui(page, extra_ms: int = 0, timeout: int = 15000) -> None:
         page.wait_for_timeout(extra_ms)
 
 
-def visible(locator) -> bool:
+def first_visible(locator, limit: int = 12):
+    """Return the first visible match. ADF often clones hidden nodes as locator.first."""
     try:
-        return locator.count() > 0 and locator.first.is_visible()
+        count = locator.count()
     except Exception:
-        return False
+        return None
+    for i in range(min(count, limit)):
+        item = locator.nth(i)
+        try:
+            if item.is_visible():
+                return item
+        except Exception:
+            continue
+    return None
+
+
+def visible(locator) -> bool:
+    return first_visible(locator) is not None
 
 
 def click_ready(locator, *, force: bool = False, timeout: int = 10000) -> bool:
     """Click when visible. force=True only for ADF menus that sit under a glass pane."""
     try:
-        target = locator.first
-        target.wait_for(state="visible", timeout=timeout)
+        target = first_visible(locator)
+        if target is None:
+            locator.first.wait_for(state="visible", timeout=timeout)
+            target = first_visible(locator) or locator.first
         target.click(force=force, timeout=timeout)
         return True
     except Exception as exc:
@@ -287,61 +348,193 @@ def append_audit(cfg: Config, record: dict) -> None:
 
 
 # ---------- Login / navigation ----------
+LOGIN_PAGE_URL = "https://www.mdsystem.com/imdsnt/faces/login?language=en"
+USERNAME_SELECTORS = (
+    "input[id*='UserId' i][id$='::content']",
+    "input[id*='userid' i][id$='::content']",
+    "input[id*='User' i][id$='::content']",
+    "input[id*='itUser' i]",
+    "#username",
+    "input[name='username']",
+    "input[name='userid']",
+    "input[name='j_username']",
+    "input[title*='User' i]",
+    "input[placeholder*='User' i]",
+    "input[aria-label*='User' i]",
+)
+
+
+def _username_locator(root):
+    return root.locator(", ".join(USERNAME_SELECTORS))
+
+
+def _dump_login_debug(page, cfg: Config, name: str) -> None:
+    save_screenshot(page, cfg, name, important=True)
+    try:
+        html_path = cfg.output_dir / "login_page.html"
+        html_path.write_text(page.content(), encoding="utf-8")
+        log.info("Wrote %s", html_path)
+    except Exception as exc:
+        log.warning("Could not write login HTML: %s", exc)
+    try:
+        bits = []
+        for el in page.locator("input, a, button").all()[:40]:
+            bits.append(
+                {
+                    "tag": el.evaluate("e => e.tagName"),
+                    "id": el.get_attribute("id"),
+                    "name": el.get_attribute("name"),
+                    "type": el.get_attribute("type"),
+                    "text": (el.inner_text() or "")[:80],
+                    "visible": el.is_visible(),
+                }
+            )
+        log.info("Login DOM sample: %s", bits)
+    except Exception as exc:
+        log.warning("Could not list login DOM: %s", exc)
+
+
+def _click_landing_login(page) -> bool:
+    """Public IMDS page has a Login link with a key icon; fields are not on that page."""
+    candidates = [
+        page.locator("a:has(img):has-text('Login')"),
+        page.locator("xpath=//a[.//img and contains(normalize-space(.), 'Login')]"),
+        page.get_by_role("link", name=re.compile(r"^Login$")),
+        page.locator("a").filter(has_text=re.compile(r"^Login$")),
+        page.locator(
+            "xpath=//img[contains(translate(@src,'KEY','key'),'key') or "
+            "contains(translate(@alt,'LOGIN','login'),'login')]/ancestor::a[1]"
+        ),
+        page.locator(
+            "xpath=//*[contains(., 'User ID forgotten')]/ancestor::table[1]"
+            "//a[contains(normalize-space(.), 'Login')]"
+        ),
+        page.get_by_text("Login", exact=True),
+    ]
+    for loc in candidates:
+        target = first_visible(loc)
+        if target is None:
+            continue
+        try:
+            target.click(timeout=8000)
+            log.info("Clicked the IMDS Login control.")
+            log.info("URL after Login click: %s", page.url)
+            return True
+        except Exception as exc:
+            log.warning("Login click failed (%s); trying force.", exc)
+            try:
+                target.click(force=True, timeout=8000)
+                log.info("Clicked the IMDS Login control (force).")
+                log.info("URL after Login click: %s", page.url)
+                return True
+            except Exception as exc2:
+                log.warning("Force Login click failed: %s", exc2)
+    return False
+
+
+def _visible_username(page):
+    for root in [page, *list(page.frames)]:
+        try:
+            hit = first_visible(_username_locator(root))
+        except Exception:
+            continue
+        if hit is not None:
+            return hit
+        try:
+            text_inputs = first_visible(root.locator("input[type='text']:not([type='hidden'])"))
+        except Exception:
+            text_inputs = None
+        if text_inputs is not None:
+            return text_inputs
+    return None
+
+
+def _submit_imds_credentials(page) -> None:
+    for selector in (
+        "a:has-text('Continue')",
+        "button:has-text('Continue')",
+        "input[value='Continue']",
+        "button:has-text('Sign in')",
+        "input[value*='Sign in']",
+        "a:has-text('Sign in')",
+    ):
+        if click_ready(page.locator(selector)):
+            log.info("Submitted credentials via %s", selector)
+            return
+    page.keyboard.press("Enter")
+    log.info("Submitted credentials with Enter.")
+
+
 def imds_login(page, cfg: Config) -> None:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
     log.info("Logging in...")
-    page.goto("https://www.mdsystem.com/imdsnt", wait_until="domcontentloaded", timeout=60000)
-    wait_ui(page, extra_ms=300)
-
-    login_link = page.locator("a:has-text('Login')").first
-    if visible(login_link):
-        click_ready(login_link)
-        wait_ui(page, extra_ms=300)
-
-    username = page.locator("#username, input[name='username']").first
+    page.goto(LOGIN_PAGE_URL, wait_until="domcontentloaded", timeout=60000)
     try:
-        username.wait_for(state="visible", timeout=30000)
+        page.get_by_text("User ID forgotten").first.wait_for(state="visible", timeout=45000)
     except PlaywrightTimeoutError:
-        sso_btn = page.locator("button:has-text('Sign in'), a:has-text('Sign in')").first
-        if not visible(sso_btn) or not click_ready(sso_btn):
-            save_screenshot(page, cfg, "login_username_not_found.png", important=True)
-            raise RuntimeError("Cannot find username field or sign-in button.")
-        username = page.locator("#username, input[name='username']").first
-        username.wait_for(state="visible", timeout=15000)
+        log.warning("Did not see 'User ID forgotten' landmark; continuing.")
+    wait_ui(page, extra_ms=500)
+
+    if _visible_username(page) is None:
+        if not _click_landing_login(page):
+            log.warning("Login link was not clicked; username fields may still appear.")
+        wait_ui(page, extra_ms=1000)
+
+    username = None
+    for _ in range(25):
+        username = _visible_username(page)
+        if username is not None:
+            break
+        page.wait_for_timeout(1000)
+    if username is None:
+        _dump_login_debug(page, cfg, "login_username_not_found.png")
+        raise RuntimeError(
+            "Cannot find username field. On the IMDS home page, click Login "
+            "(key icon) first — the User ID box is not on the public landing page."
+        )
 
     username.fill(cfg.username)
-    next_btn = page.locator("button:has-text('Sign in'), button:has-text('Next')").first
-    if visible(next_btn):
-        click_ready(next_btn)
-    else:
-        username.press("Enter")
-    wait_ui(page, extra_ms=300)
+    log.info("Filled User ID (value not logged).")
 
-    password = page.locator("input[type='password']").first
-    try:
-        password.wait_for(state="visible", timeout=15000)
-    except PlaywrightTimeoutError:
-        save_screenshot(page, cfg, "login_password_not_found.png", important=True)
-        raise RuntimeError("Password field not found after username submission.")
+    password = None
+    for root in [page, *list(page.frames)]:
+        hit = first_visible(root.locator("input[type='password']"))
+        if hit is not None:
+            password = hit
+            break
+    if password is None:
+        next_btn = page.locator("button:has-text('Sign in'), button:has-text('Next'), a:has-text('Next')")
+        if visible(next_btn):
+            click_ready(next_btn)
+            wait_ui(page, extra_ms=400)
+        else:
+            username.press("Enter")
+            wait_ui(page, extra_ms=400)
+        try:
+            page.locator("input[type='password']").first.wait_for(state="visible", timeout=15000)
+        except PlaywrightTimeoutError:
+            _dump_login_debug(page, cfg, "login_password_not_found.png")
+            raise RuntimeError("Password field not found after username submission.")
+        password = first_visible(page.locator("input[type='password']"))
+        if password is None:
+            _dump_login_debug(page, cfg, "login_password_not_found.png")
+            raise RuntimeError("Password field not found after username submission.")
+
     password.fill(cfg.password)
-    login_btn = page.locator(
-        "button:has-text('Sign in'), button:has-text('Login'), input[value*='Sign in'], input[value*='Login']"
-    ).first
-    if visible(login_btn):
-        click_ready(login_btn)
-    else:
-        password.press("Enter")
-    wait_ui(page, extra_ms=400)
+    log.info("Filled password (value not logged).")
+    _submit_imds_credentials(page)
+    wait_ui(page, extra_ms=600)
 
     try:
         otp_field = page.locator(
-            "input[type='text'][placeholder*='code' i], input[type='text'][placeholder*='OTP' i], input[name='otp'], input#otp"
+            "input[type='text'][placeholder*='code' i], input[type='text'][placeholder*='OTP' i], "
+            "input[name='otp'], input#otp, input[id*='otp' i][id$='::content']"
         ).first
         otp_field.wait_for(state="visible", timeout=15000)
         otp_field.fill(get_otp(cfg.otp_secret))
         log.info("Filled OTP (value not logged).")
-        submit_otp = page.locator("button:has-text('Verify'), button:has-text('Submit')").first
+        submit_otp = page.locator("button:has-text('Verify'), button:has-text('Submit'), a:has-text('Continue')")
         if visible(submit_otp):
             click_ready(submit_otp)
         else:
@@ -350,8 +543,8 @@ def imds_login(page, cfg: Config) -> None:
     except PlaywrightTimeoutError:
         log.info("No OTP field appeared.")
 
-    if visible(page.locator("button:has-text('Login')").first):
-        save_screenshot(page, cfg, "login_failed.png", important=True)
+    if visible(page.get_by_text("User ID forgotten")) and _visible_username(page) is not None:
+        _dump_login_debug(page, cfg, "login_failed.png")
         raise RuntimeError("Login failed.")
     log.info("Login successful.")
     save_screenshot(page, cfg, "01_after_login.png", important=True)
@@ -1169,7 +1362,139 @@ def process_rows_and_export(page, cfg: Config) -> list[dict]:
     return results
 
 
-def orchestrate() -> int:
+def _asyncio_loop_is_running() -> bool:
+    """True inside Jupyter/Colab (and any other running asyncio loop)."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def _orchestrate_in_subprocess() -> int:
+    """Run this file in a child process so Playwright Sync API can start.
+
+    Playwright raises:
+      "It looks like you are using Playwright Sync API inside the asyncio loop"
+    when sync_playwright() is called from a Colab/ipywidgets click handler.
+    """
+    script = Path(__file__).resolve()
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env["IMDS_INSIDE_ORCHESTRATE_SUBPROCESS"] = "1"
+    log.info(
+        "Colab/Jupyter asyncio loop is running — Playwright Sync API cannot start "
+        "in this process. Launching %s in a subprocess.",
+        script.name,
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-u", str(script)],
+        cwd=str(script.parent),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        print(line, end="")
+        sys.stdout.flush()
+    rc = proc.wait()
+    return int(rc if rc is not None else 1)
+
+
+def libatk_present() -> bool:
+    return any(path.exists() for path in LIBATK_CANDIDATES)
+
+
+def _looks_like_missing_chromium_lib(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(
+        needle in text
+        for needle in (
+            "shared libraries",
+            "libatk",
+            "cannot open shared object",
+            "target page, context or browser has been closed",
+            "targetclosederror",
+        )
+    )
+
+
+def ensure_chromium_os_deps() -> None:
+    """Install libatk and friends. Colab's `playwright install chromium` skips these."""
+    if os.environ.get("IMDS_SKIP_BROWSER_DEPS") == "1":
+        return
+    if libatk_present():
+        return
+    log.info("Chromium OS libraries missing (libatk-1.0.so.0). Installing Playwright deps...")
+    env = os.environ.copy()
+    env["DEBIAN_FRONTEND"] = "noninteractive"
+    subprocess.run(
+        [sys.executable, "-m", "playwright", "install-deps", "chromium"],
+        env=env,
+        check=False,
+    )
+    if libatk_present():
+        log.info("Playwright install-deps provided libatk.")
+        return
+    subprocess.run(["apt-get", "update", "-qq"], env=env, check=False)
+    t64 = [pkg for pkg in CHROMIUM_APT_PACKAGES if pkg.endswith("t64")]
+    legacy = [pkg for pkg in CHROMIUM_APT_PACKAGES if not pkg.endswith("t64")]
+    for batch in (t64, legacy):
+        subprocess.run(
+            ["apt-get", "install", "-y", "-qq", "--no-install-recommends", *batch],
+            env=env,
+            check=False,
+        )
+        if libatk_present():
+            log.info("apt installed libatk.")
+            return
+    log.error(
+        "Still missing libatk-1.0.so.0. In Colab run: "
+        "!python -m playwright install-deps chromium"
+    )
+
+
+def _launch_chromium(playwright, cfg):
+    ensure_chromium_os_deps()
+    kwargs = {"headless": cfg.headless, "args": list(CHROMIUM_LAUNCH_ARGS)}
+    try:
+        return playwright.chromium.launch(**kwargs)
+    except Exception as exc:
+        if not _looks_like_missing_chromium_lib(exc):
+            raise
+        log.warning("Chromium launch failed (%s). Installing OS deps and retrying once.", exc)
+        os.environ.pop("IMDS_SKIP_BROWSER_DEPS", None)
+        env = os.environ.copy()
+        env["DEBIAN_FRONTEND"] = "noninteractive"
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install-deps", "chromium"],
+            env=env,
+            check=False,
+        )
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            env=env,
+            check=False,
+        )
+        if not libatk_present():
+            subprocess.run(["apt-get", "update", "-qq"], env=env, check=False)
+            t64 = [pkg for pkg in CHROMIUM_APT_PACKAGES if pkg.endswith("t64")]
+            legacy = [pkg for pkg in CHROMIUM_APT_PACKAGES if not pkg.endswith("t64")]
+            for batch in (t64, legacy):
+                subprocess.run(
+                    ["apt-get", "install", "-y", "-qq", "--no-install-recommends", *batch],
+                    env=env,
+                    check=False,
+                )
+                if libatk_present():
+                    break
+        return playwright.chromium.launch(**kwargs)
+
+
+def _orchestrate_live() -> int:
     cfg = load_config()
     if kill_is_on(cfg):
         log.error("Kill switch is on (IMDS_KILL_SWITCH or %s). Not starting.", cfg.output_dir / "KILL")
@@ -1184,23 +1509,46 @@ def orchestrate() -> int:
 
     from playwright.sync_api import sync_playwright
 
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=cfg.headless)
-        page = browser.new_page()
-        try:
-            imds_login(page, cfg)
-            if not navigate_to_search_page(page, cfg):
-                raise RuntimeError("Could not open Received MDSs search")
-            apply_not_yet_browsed_filter(page, cfg)
-            process_rows_and_export(page, cfg)
-            log.info("All done.")
-            return 0
-        except Exception as exc:
-            log.error("Script failed: %s", exc)
-            save_screenshot(page, cfg, "error.png", important=True)
-            return 1
-        finally:
-            browser.close()
+    try:
+        with sync_playwright() as playwright:
+            browser = _launch_chromium(playwright, cfg)
+            page = browser.new_page()
+            try:
+                imds_login(page, cfg)
+                if not navigate_to_search_page(page, cfg):
+                    raise RuntimeError("Could not open Received MDSs search")
+                apply_not_yet_browsed_filter(page, cfg)
+                process_rows_and_export(page, cfg)
+                log.info("All done.")
+                return 0
+            except Exception as exc:
+                log.error("Script failed: %s", exc)
+                save_screenshot(page, cfg, "error.png", important=True)
+                return 1
+            finally:
+                browser.close()
+    except Exception as exc:
+        log.error("Could not start Chromium: %s", exc)
+        if _looks_like_missing_chromium_lib(exc) or not libatk_present():
+            log.error(
+                "Colab is missing Chromium OS libraries (often libatk-1.0.so.0). "
+                "Re-run Cell 1, or run: !python -m playwright install-deps chromium"
+            )
+        return 1
+
+
+def orchestrate() -> int:
+    """Live IMDS session. Safe to call from Colab's green button.
+
+    If the current process already has a running asyncio loop (Jupyter/Colab),
+    Playwright Sync API cannot start here. The agent is launched as
+    `python -u imds_agent_v2.py` in a child process instead.
+    """
+    if os.environ.get("IMDS_INSIDE_ORCHESTRATE_SUBPROCESS") == "1":
+        return _orchestrate_live()
+    if _asyncio_loop_is_running():
+        return _orchestrate_in_subprocess()
+    return _orchestrate_live()
 
 
 def _write_fixture_excel(output_dir: Path) -> Path:
@@ -1280,6 +1628,7 @@ def run_self_test(tmp_dir: str | None = None) -> int:
     output.mkdir(parents=True, exist_ok=True)
 
     os.environ["IMDS_SKIP_VAULT"] = "1"
+    os.environ["IMDS_SKIP_BROWSER_DEPS"] = "1"
     os.environ["IMDS_VAULT_PATH"] = str(output / "no-vault.enc")
     # Config fail-fast without secrets
     saved = {k: os.environ.pop(k, None) for k in ("IMDS_USERNAME", "IMDS_PASSWORD", "OTP_SECRET")}
