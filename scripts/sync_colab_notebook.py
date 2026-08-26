@@ -47,6 +47,13 @@ def main() -> None:
         markdown_cell(
             """# Agentic MDS — one-button live run
 
+**Do not paste this `.ipynb` file into a code cell.** It is JSON. That causes `NameError: name 'true' is not defined`.
+
+Open it as a notebook instead:
+- [Open in Google Colab](https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/main/Colab_Start_Here.ipynb) (recommended)
+- Or Colab **File → Upload notebook** and select the `.ipynb` file
+- Or Colab **File → New notebook** and paste only the clone cell from `Colab_Start_Here.ipynb`
+
 Set secrets **once** in Colab 🔑 (left sidebar). They stay in your Google account and are **not** in this public notebook or GitHub.
 
 | Secret | Purpose |
