@@ -309,16 +309,61 @@ def recipient_id_in_text(tree_text: str, company_id: str) -> bool:
     return f"[{cid}]" in (tree_text or "")
 
 
+def contact_display_value(control_text: str) -> str:
+    """First visible line of the ADF contact control (ignore the option list)."""
+    for line in (control_text or "").splitlines():
+        s = line.strip()
+        if s:
+            return s
+    return (control_text or "").strip()
+
+
+def contact_is_blank(display: str) -> bool:
+    t = " ".join((display or "").lower().split())
+    return t in {"", "-", "–", "—", "select", "please select", "no data", "none"}
+
+
 def contact_name_matches(control_text: str, contact_name: str) -> bool:
-    """True when Supplier Data already shows the contact (span or select label)."""
-    hay = " ".join((control_text or "").lower().split())
+    """True only when the displayed *selected* value is this contact.
+
+    ADF inner_text can dump every dropdown option. Use the first line only and
+    reject empty / '-' / long option lists. Otherwise IMDS Check fails with
+    'Contact must be specified' after we skip re-select.
+    """
+    display = contact_display_value(control_text)
+    if contact_is_blank(display):
+        return False
+    hay = " ".join(display.lower().split())
     needle = (contact_name or "").strip().lower()
-    if not hay or not needle:
+    if not needle:
+        return False
+    if len(hay) > max(80, len(needle) + 40):
         return False
     if needle in hay:
         return True
     last = needle.split(",")[0].strip()
-    return bool(last) and last in hay
+    return bool(last) and (hay == last or hay.startswith(last + ",") or hay.startswith(last + " "))
+
+
+def is_check_errors_blocking_prompt(text: str) -> bool:
+    """True for the Check-results dialog that disables Propose until errors are fixed."""
+    t = " ".join((text or "").lower().split())
+    if "contact must be specified" in t:
+        return True
+    if "all existing errors need to be eliminated" in t:
+        return True
+    if "further processing may take place" in t and "error" in t:
+        return True
+    return False
+
+
+def propose_blocked_message(dialog_text: str) -> str | None:
+    """Action Result when Propose is blocked by Check errors. None if not blocked."""
+    if not is_check_errors_blocking_prompt(dialog_text):
+        return None
+    if "contact must be specified" in (dialog_text or "").lower():
+        return "Propose Failed (Contact must be specified)"
+    return "Propose Failed (Check errors)"
 
 
 def company_id_was_filled(filled_value, company_id: str) -> bool:
@@ -337,6 +382,10 @@ def should_js_strip_modal(*, lookup_iframes: int, dialog_text: str = "", yes_no:
     if is_save_changes_prompt(dialog_text) or is_forward_previous_version_prompt(dialog_text):
         return False
     if is_empty_search_criteria_prompt(dialog_text):
+        return False
+    if is_check_errors_blocking_prompt(dialog_text):
+        return False
+    if "check results" in (dialog_text or "").lower() and "error" in (dialog_text or "").lower():
         return False
     return True
 
@@ -764,6 +813,34 @@ def close_company_lookup_dialogs(page, max_rounds: int = 8) -> bool:
     return True
 
 
+def close_check_results_dialog(page) -> bool:
+    """Cancel the Check-results overlay (Propose is disabled when errors exist)."""
+    dialog_text = visible_dialog_text(page)
+    if not (
+        is_check_errors_blocking_prompt(dialog_text)
+        or ("check results" in (dialog_text or "").lower() and "error" in (dialog_text or "").lower())
+    ):
+        return False
+    used = _click_first_matching(
+        page,
+        [
+            "#pt1\\:pt_dcud\\:ctbCancel",
+            "#pt1\\:pt_dcud\\:ctbCancel > a > span",
+            "#pt1\\:pt_dcud\\:ctbCancel > a",
+            "button:has-text('Cancel'):visible",
+            "a:has-text('Cancel'):visible",
+            "span:has-text('Cancel'):visible",
+            "input[value='Cancel']:visible",
+        ],
+    )
+    if not used:
+        log.warning("Check-results error dialog is showing but Cancel was not found.")
+        return False
+    log.info(f"Clicked Cancel on Check-results dialog via {used}")
+    page.wait_for_timeout(1000)
+    return True
+
+
 def wait_for_glass_pane_clear(page, timeout_ms: int = 8000, allow_escape: bool = True) -> bool:
     """Dismiss leftover IMDS dialogs so they cannot intercept later clicks."""
     deadline = time.time() + timeout_ms / 1000.0
@@ -891,6 +968,13 @@ def dismiss_modal(page, allow_escape: bool = True):
         close_company_lookup_dialogs(page)
         return lookup_company_iframe_count(page) == 0
 
+    if is_check_errors_blocking_prompt(dialog_text):
+        log.info("Check-results error dialog is showing; clicking Cancel (not Propose, not JS strip).")
+        if close_check_results_dialog(page):
+            return not modal_dialog_visible(page)
+        log.warning("Leaving Check-results dialog in place; JS strip would freeze the leftover own MDS.")
+        return False
+
     for selector in [
         "#pt1\\:pt_dcud\\:ctbOk",
         "#pt1\\:pt_dcud\\:ctbOk > a > span",
@@ -946,6 +1030,11 @@ def dismiss_modal(page, allow_escape: bool = True):
         log.warning("Leaving Yes/No save/forward dialog in place; JS strip would freeze the MDS sheet.")
         return False
 
+    leftover_text = visible_dialog_text(page)
+    if is_check_errors_blocking_prompt(leftover_text):
+        log.warning("Leaving Check-results dialog in place; JS strip would freeze the leftover own MDS.")
+        return False
+
     lookup_n = lookup_company_iframe_count(page)
     if not should_js_strip_modal(
         lookup_iframes=lookup_n,
@@ -976,6 +1065,7 @@ def dismiss_modal(page, allow_escape: bool = True):
 # ---------- Navigate to Search Page ----------
 def navigate_to_search_page(page):
     log.info("Navigating to Received MDSs search page...")
+    close_check_results_dialog(page)
     close_company_lookup_dialogs(page)
     if on_public_login_page(page):
         log.warning("Session is on the public login page; logging in again.")
@@ -2165,26 +2255,34 @@ def select_contact_person(page, contact_name="Qu, Theresa"):
     def _control_text(loc) -> str:
         if loc is None:
             return ""
-        for reader in ("inner_text", "text_content"):
-            try:
-                text = getattr(loc, reader)(timeout=800)
-                if text and str(text).strip():
-                    return str(text)
-            except Exception:
-                continue
         try:
-            return str(loc.evaluate(
+            text = loc.evaluate(
                 """el => {
                     if (!el) return '';
                     if (el.options && el.selectedIndex >= 0) {
                         const opt = el.options[el.selectedIndex];
-                        return opt ? (opt.text || '') : '';
+                        return opt ? (opt.text || '').trim() : '';
                     }
-                    return el.textContent || el.innerText || '';
+                    const clone = el.cloneNode(true);
+                    clone.querySelectorAll(
+                        '[role="listbox"], ul, li, option, .AFPopupMenu, [id*="popup"]'
+                    ).forEach(n => n.remove());
+                    const t = (clone.innerText || clone.textContent || '').trim();
+                    return t.split('\\n')[0].trim();
                 }"""
-            ) or "")
+            )
+            if text and str(text).strip():
+                return contact_display_value(str(text))
         except Exception:
-            return ""
+            pass
+        for reader in ("inner_text", "text_content"):
+            try:
+                text = getattr(loc, reader)(timeout=800)
+                if text and str(text).strip():
+                    return contact_display_value(str(text))
+            except Exception:
+                continue
+        return ""
 
     def _first_select():
         for xp in XP_CONTACT_SELECTORS:
@@ -2237,6 +2335,11 @@ def select_contact_person(page, contact_name="Qu, Theresa"):
             log.info(f"Contact already {contact_name}; skipping re-select.")
             save_screenshot(page, "after_contact_selection.png")
             return True
+        try:
+            shown = _control_text(dropdown)
+            log.info(f"Contact display value: {shown!r}; selecting {contact_name}.")
+        except Exception:
+            pass
 
         try:
             tag = ""
@@ -2314,7 +2417,12 @@ def select_contact_person(page, contact_name="Qu, Theresa"):
             log.info(f"Selected {contact_name} from custom dropdown")
             page.wait_for_timeout(400)
             save_screenshot(page, "after_contact_selection.png")
-            return _selected() or True
+            if _selected():
+                return True
+            log.warning(
+                f"Clicked {contact_name} in the dropdown but the displayed value is still not that contact."
+            )
+            return False
 
         log.warning(f"Option '{contact_name}' not found.")
         return False
@@ -2493,6 +2601,13 @@ def _fill_supplier_part_and_propose(page, company_id, supplier_code, part_no):
         log.warning(f"Error clicking Propose: {e}")
         return "Propose Failed"
 
+    blocked_after_click = propose_blocked_message(visible_dialog_text(page))
+    if blocked_after_click:
+        log.warning("Check-results errors after Propose; not clicking the disabled Propose confirm.")
+        save_screenshot(page, f"propose_blocked_{company_id}.png")
+        close_check_results_dialog(page)
+        return blocked_after_click
+
     try:
         propose_modal_btn = page.locator(f"xpath={XP_PROPOSE_MODAL}")
         if propose_modal_btn.count() > 0 and propose_modal_btn.is_visible():
@@ -2535,12 +2650,20 @@ def _fill_supplier_part_and_propose(page, company_id, supplier_code, part_no):
         log.warning(f"Error handling propose modal: {e}")
         dismiss_modal(page)
 
+    blocked = propose_blocked_message(visible_dialog_text(page))
+    if blocked:
+        log.warning("Propose blocked by Check errors; cancelling the dialog.")
+        save_screenshot(page, f"propose_blocked_{company_id}.png")
+        close_check_results_dialog(page)
+        return blocked
+
     save_screenshot(page, f"after_recipient_{company_id}.png")
     return None
 
 
 def complete_forward_recipients(page, supplier_code, part_no):
     log.info("Completing recipient assignment for forwarded MDS...")
+    close_check_results_dialog(page)
     close_company_lookup_dialogs(page)
     wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False)
 
@@ -2559,6 +2682,7 @@ def complete_forward_recipients(page, supplier_code, part_no):
 
     if not contact_ok:
         log.warning("Contact person selection failed on the forwarded own MDS.")
+        return False, "Contact person selection Failed"
 
     _open_detail_tab(page, XP_RECIPIENT_DATA, "Recipient Data", "recipient_data.png")
 
@@ -2846,8 +2970,6 @@ def complete_forward_recipients(page, supplier_code, part_no):
     if failures:
         extra = f"; proposed {', '.join(proposed)}" if proposed else ""
         return False, "; ".join(failures) + extra
-    if not contact_ok:
-        return True, "Accepted, forwarded, proposed (contact selection failed)"
     return True, "Accepted, forwarded, proposed"
 
 # ---------- Set Search Filters ----------
@@ -3007,6 +3129,12 @@ def wait_for_mds_content_page(page, expected_id: str | None = None) -> bool:
     if last_status == "mismatch":
         log.warning(f"Opened MDS {last_id} does not match expected ID {expected_id}.")
         save_screenshot(page, "mds_id_mismatch.png")
+        return False
+    if expected_id and last_status != "match":
+        log.warning(
+            f"Did not confirm MDS {expected_id} (on-screen {last_id!r}); "
+            "not clicking Ingredients on a leftover or search page."
+        )
         return False
 
     click_ingredients_tab(page)
@@ -3252,6 +3380,7 @@ def accept_passed_mds(page, results):
             log.warning("Recipient assignment incomplete.")
         save_check_summary(results)
 
+        close_check_results_dialog(page)
         if not navigate_to_search_page(page):
             log.warning("Could not return to Received MDSs search after propose; leftover MDS may remain open.")
         wait_for_glass_pane_clear(page, timeout_ms=4000)
