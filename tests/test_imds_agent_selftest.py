@@ -30,6 +30,9 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertIn("previous-version forward prompt", text)
         self.assertIn("def is_save_changes_prompt", text)
         self.assertIn("Save-changes prompt is showing", text)
+        self.assertIn("def wait_for_forwarded_own_mds", text)
+        self.assertIn("Completing contact, recipients, and propose on this new ID", text)
+        self.assertNotIn("dropdown.count() == 0 or not dropdown.is_visible()", text)
         self.assertIn("retrying with all statuses", text)
         self.assertIn("not clicking Ingredients on the leftover sheet", text)
         self.assertNotIn("Looking for Yes button.", text)
@@ -112,6 +115,10 @@ class ForwardPromptHelpers(unittest.TestCase):
         self.assertEqual(imds_agent_v2.mds_open_status("1522070544 / 2", "1522070544"), "match")
         self.assertEqual(imds_agent_v2.mds_open_status("1522107776 / 1.01", "1522070544"), "mismatch")
         self.assertEqual(imds_agent_v2.parse_mds_id_number("1522107776 / 1.01"), "1522107776")
+        self.assertNotEqual(
+            imds_agent_v2.parse_mds_id_number("1522275960 / 0.01"),
+            imds_agent_v2.parse_mds_id_number("1522267651 / 1"),
+        )
 
 
 class SummaryExportTests(unittest.TestCase):
