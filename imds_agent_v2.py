@@ -142,6 +142,7 @@ XP_COMBINED_ALL = "//*[@id='pt1:dcCmds:sfIbLU:cbAll']/a"
 XP_ID_FIELD = "//*[@id='pt1:dcCmds:sfIbLU:itModuleId::content']"
 XP_SEARCH_BUTTON = "//*[@id='pt1:dcCmds:sfIbLU:cbSearch']/a"
 XP_FIRST_ROW = "//*[@id='pt1:dcCmds:sfIbLU:pc2:tResult::db']/table/tbody/tr"
+XP_FIRST_RESULT_NAME = "//*[@id='pt1:dcCmds:sfIbLU:pc2:tResult:0:cName']"
 XP_MDS_MENU = "//*[@id='pt1:pt_mFile']/div/table/tbody/tr/td[2]/a"
 XP_ACCEPT = "//*[@id='pt1:pt_cmiMenuAccept']/td[2]"
 XP_ACCEPT_MODAL = "//*[@id='dcPopup:ctbAcceptMds']/a/span"
@@ -170,6 +171,23 @@ XP_CONTACT_FALLBACKS = [
     "//*[@id='pt1:dcSupp:pglSupplierContact']",
 ]
 XP_RECIPIENT_DATA = "//*[@id='pt1:sdiDetailRecipients::disAcr']"
+XP_INGREDIENTS_TAB = [
+    "//*[@id='pt1:sdiIngr::disAcr']",
+    "//*[@id='pt1:sdiDetailIngredients::disAcr']",
+    "//*[@id='pt1:sdiDetailIngr::disAcr']",
+    "//*[@id='pt1:sdiIngredients::disAcr']",
+]
+XP_INGREDIENTS_EXPAND = "//*[@id='pt1:dcIngr:ctbExpandAll']"
+XP_TOOLBAR_ACCEPT = [
+    "//*[@id='pt1:pt_ctbAccept']",
+    "//*[@id='pt1:pt_ctbAccept']//a",
+    "//*[@id='pt1:pt_ctbAccept::icon']",
+]
+XP_TOOLBAR_FORWARD = [
+    "//*[@id='pt1:pt_ctbForward']",
+    "//*[@id='pt1:pt_ctbForward']//a",
+    "//*[@id='pt1:pt_ctbForward::icon']",
+]
 XP_ADD_RECIPIENT = "//*[@id='pt1:dcReci:ctbAddRecipient::icon']"
 XP_PROPOSE = "//*[@id='pt1:dcReci:ctbRecipPropose']/a/span"
 XP_PROPOSE_MODAL = "//*[@id='dcPopup:ctbMultiPurpose']/a"
@@ -1112,6 +1130,13 @@ def accept_mds(page):
                 except Exception as e:
                     log.warning(f"Fallback selector {selector} failed: {e}")
             if not accepted:
+                log.warning("Accept menu item not found; trying Ingredients toolbar Accept.")
+                for xp in XP_TOOLBAR_ACCEPT:
+                    if _click_xpath_if_present(page, xp):
+                        log.info(f"Clicked toolbar Accept via {xp}")
+                        accepted = True
+                        break
+            if not accepted:
                 log.warning("Accept menu item not found.")
                 save_screenshot(page, "accept_menu_item_not_found.png")
                 return False
@@ -1330,6 +1355,22 @@ def _click_xpath_if_present(page, xpath, *, hover_first: bool = False) -> bool:
 def forward_mds(page):
     log.info("Forwarding MDS using exact XPaths...")
     dismiss_modal(page)
+    for xp in XP_TOOLBAR_FORWARD:
+        if _click_xpath_if_present(page, xp):
+            log.info(f"Clicked Ingredients toolbar Forward via {xp}")
+            page.wait_for_timeout(2000)
+            try:
+                ok_btn = page.locator(f"xpath={XP_FORWARD_OK}")
+                if ok_btn.count() > 0:
+                    ok_btn.first.click(force=True)
+                    log.info("Clicked OK on Forward modal (exact XPath).")
+                    page.wait_for_timeout(2000)
+            except Exception:
+                dismiss_modal(page)
+            page.wait_for_load_state("networkidle", timeout=15000)
+            page.wait_for_timeout(2000)
+            save_screenshot(page, "after_forward.png")
+            return True
     try:
         mds_menu = page.locator(f"xpath={XP_MDS_MENU}")
         if mds_menu.count() > 0 and mds_menu.is_visible():
@@ -1396,6 +1437,12 @@ def forward_mds(page):
                         break
                     except Exception as e:
                         log.warning(f"Fallback selector {selector} failed: {e}")
+            if not forward_clicked:
+                for xp in XP_TOOLBAR_FORWARD:
+                    if _click_xpath_if_present(page, xp):
+                        log.info(f"Clicked Ingredients toolbar Forward via {xp}")
+                        forward_clicked = True
+                        break
             if not forward_clicked:
                 log.warning("Forward menu item not found.")
                 save_screenshot(page, "forward_menu_not_found.png")
@@ -2003,12 +2050,121 @@ def set_browsed_filter(page):
     except Exception as e:
         log.warning(f"Error clicking Browsed checkbox: {e}")
 
-# ---------- Process PASS MDSs ----------
+def click_ingredients_tab(page) -> bool:
+    """Ingredients tab is where Accept/Forward toolbar icons become active."""
+    for xp in XP_INGREDIENTS_TAB:
+        if _click_xpath_if_present(page, xp):
+            log.info(f"Clicked Ingredients tab via {xp}")
+            page.wait_for_timeout(1500)
+            return True
+    try:
+        tab = page.get_by_text("Ingredients", exact=True)
+        if tab.count() > 0:
+            tab.first.click(force=True, timeout=5000)
+            log.info("Clicked Ingredients tab by visible text.")
+            page.wait_for_timeout(1500)
+            return True
+    except Exception as e:
+        log.warning(f"Ingredients tab text click failed: {e}")
+    return False
+
+
+def wait_for_mds_content_page(page, expected_id: str | None = None) -> bool:
+    """Stay on the MDS Ingredients page (ID / Version + tree). MDS menu exists on search too, so do not use it as the ready signal."""
+    dismiss_modal(page)
+    click_ingredients_tab(page)
+    landmarks = [
+        "td:has-text('ID / Version')",
+        f"xpath={XP_INGREDIENTS_EXPAND}",
+        f"xpath={XP_INGREDIENTS_EXPAND}/table",
+        "label:has-text('MDS Supplier')",
+        "label:has-text('Name / Trade name')",
+    ]
+    ready = False
+    for _ in range(20):
+        dismiss_modal(page)
+        for sel in landmarks:
+            try:
+                loc = page.locator(sel)
+                if loc.count() > 0 and loc.first.is_visible():
+                    ready = True
+                    break
+            except Exception:
+                continue
+        if ready:
+            break
+        page.wait_for_timeout(500)
+    if not ready:
+        log.warning("MDS Ingredients page did not load. Accept/Forward stay inactive on the search list.")
+        save_screenshot(page, "mds_content_page_not_loaded.png")
+        return False
+    mds_id = extract_mds_id_version_early(page)
+    log.info(f"MDS Ingredients page is open. ID/Version={mds_id}")
+    if expected_id and mds_id and mds_id != "EXTRACTION_FAILED":
+        compact = mds_id.replace(" ", "")
+        if expected_id not in compact and expected_id not in mds_id:
+            log.warning(f"Opened MDS {mds_id} does not match expected ID {expected_id}.")
+            save_screenshot(page, "mds_id_mismatch.png")
+            return False
+    return True
+
+
+def open_first_result_on_content_page(page, mds_id_num: str) -> bool:
+    """Double-click the first result name cell (same XPath family as scoring) and wait for Ingredients."""
+    name_cell = page.locator(f"xpath={XP_FIRST_RESULT_NAME}")
+    row = None
+    try:
+        if name_cell.count() > 0:
+            row = name_cell.first
+            log.info("Using first result name cell tResult:0:cName")
+        else:
+            rows = page.locator(f"xpath={XP_FIRST_ROW}").all()
+            if not rows:
+                log.warning(f"No rows found for MDS ID {mds_id_num}.")
+                save_screenshot(page, f"no_rows_{mds_id_num}.png")
+                return False
+            row = rows[0]
+            log.info("Using first tbody row fallback")
+    except Exception as e:
+        log.warning(f"Error finding result row: {e}")
+        return False
+
+    try:
+        row.dblclick(force=True)
+        log.info(f"Double-clicked first result for {mds_id_num}")
+        page.wait_for_load_state("networkidle", timeout=15000)
+        page.wait_for_timeout(2000)
+        dismiss_modal(page)
+    except Exception as e:
+        log.warning(f"Double-click failed: {e}")
+        try:
+            row.click(force=True)
+            page.keyboard.press("Enter")
+            page.wait_for_load_state("networkidle", timeout=15000)
+            page.wait_for_timeout(2000)
+            dismiss_modal(page)
+            log.info("Opened row via click + Enter fallback.")
+        except Exception as e2:
+            log.warning(f"Could not open result row: {e2}")
+            return False
+
+    if wait_for_mds_content_page(page, expected_id=mds_id_num):
+        save_screenshot(page, f"after_open_content_{mds_id_num}.png")
+        return True
+    log.warning("Retrying Ingredients tab after open.")
+    click_ingredients_tab(page)
+    page.wait_for_timeout(1500)
+    if wait_for_mds_content_page(page, expected_id=mds_id_num):
+        save_screenshot(page, f"after_open_content_{mds_id_num}.png")
+        return True
+    save_screenshot(page, f"after_doubleclick_{mds_id_num}.png")
+    return False
+
+
 def accept_passed_mds(page, results):
-    log.info("Starting acceptance of PASS MDSs using search-by-ID (simplified: double-click first row) with exact XPaths...")
+    log.info("Starting acceptance of PASS MDSs using search-by-ID with exact XPaths...")
     id_input_xpath = XP_ID_FIELD
     search_btn_xpath = XP_SEARCH_BUTTON
-    first_row_xpath = XP_FIRST_ROW
 
     for idx, res in enumerate(results):
         if res.get("Overall Result") != "PASS":
@@ -2046,47 +2202,21 @@ def accept_passed_mds(page, results):
             log.warning(f"Failed to click Search button: {e}. Skipping.")
             continue
 
-        row = None
-        try:
-            page.wait_for_selector("table", timeout=10000)
-            rows = page.locator(f"xpath={first_row_xpath}").all()
-            if len(rows) == 0:
-                log.warning(f"No rows found for MDS ID {mds_id_num}.")
-                save_screenshot(page, f"no_rows_{mds_id_num}.png")
-                continue
-            row = rows[0]
-            log.info(f"Found first data row for {mds_id_num}")
-        except Exception as e:
-            log.warning(f"Error finding row: {e}")
+        if not open_first_result_on_content_page(page, mds_id_num):
+            log.warning(f"Could not open Ingredients page for {mds_id_num}; Accept/Forward would be inactive.")
             continue
-
-        try:
-            row.dblclick(force=True)
-            log.info(f"Forced double-click of first data row for {mds_id_num}")
-            page.wait_for_load_state("networkidle", timeout=15000)
-            page.wait_for_timeout(2000)
-            dismiss_modal(page)
-        except Exception as e:
-            log.warning(f"Could not open row: {e}")
-            try:
-                row.click(force=True)
-                page.keyboard.press("Enter")
-                page.wait_for_load_state("networkidle", timeout=15000)
-                page.wait_for_timeout(2000)
-                dismiss_modal(page)
-                log.info("Opened row via click + Enter fallback.")
-            except Exception as e2:
-                log.warning(f"Fallback also failed: {e2}")
-                continue
 
         if not accept_mds(page):
             log.warning("Acceptance failed; skipping forwarding.")
             continue
 
-        # Handle forward confirmation modal if present
         handle_forward_confirmation_modal(page)
         page.wait_for_timeout(1500)
         dismiss_modal(page)
+        if not wait_for_mds_content_page(page, expected_id=mds_id_num):
+            log.warning("Left Ingredients page after Accept; clicking Ingredients before Forward.")
+            click_ingredients_tab(page)
+            wait_for_mds_content_page(page, expected_id=mds_id_num)
 
         if not forward_mds(page):
             log.warning("Forwarding failed; still attempting recipient/propose on the open MDS.")
@@ -2105,7 +2235,6 @@ def reject_failed_mds(page, results):
     log.info("Starting rejection of FAIL MDSs using search-by-ID...")
     id_input_xpath = XP_ID_FIELD
     search_btn_xpath = XP_SEARCH_BUTTON
-    first_row_xpath = XP_FIRST_ROW
 
     for idx, res in enumerate(results):
         if res.get("Overall Result") != "FAIL":
@@ -2141,53 +2270,9 @@ def reject_failed_mds(page, results):
             log.warning(f"Failed to click Search button: {e}. Skipping.")
             continue
 
-        row = None
-        try:
-            page.wait_for_selector("table", timeout=10000)
-            rows = page.locator(f"xpath={first_row_xpath}").all()
-            if len(rows) == 0:
-                log.warning(f"No rows found for MDS ID {mds_id_num}.")
-                save_screenshot(page, f"no_rows_{mds_id_num}.png")
-                continue
-            row = rows[0]
-            log.info(f"Found first data row for {mds_id_num}")
-        except Exception as e:
-            log.warning(f"Error finding row: {e}")
+        if not open_first_result_on_content_page(page, mds_id_num):
+            log.warning(f"Could not open Ingredients page for {mds_id_num}; Reject would be inactive.")
             continue
-
-        try:
-            row.dblclick(force=True)
-            log.info(f"Forced double-click of first data row for {mds_id_num}")
-            page.wait_for_load_state("networkidle", timeout=15000)
-            page.wait_for_timeout(2000)
-            dismiss_modal(page)
-            try:
-                page.wait_for_selector(f"xpath={XP_MDS_MENU}", timeout=10000)
-                log.info("MDS detail page loaded (MDS menu found).")
-            except Exception as e:
-                log.warning("MDS menu not found after opening. Maybe the page didn't load correctly.")
-                save_screenshot(page, f"after_doubleclick_{mds_id_num}.png")
-                continue
-            save_screenshot(page, f"after_doubleclick_{mds_id_num}.png")
-        except Exception as e:
-            log.warning(f"Could not open row: {e}")
-            try:
-                row.click(force=True)
-                page.keyboard.press("Enter")
-                page.wait_for_load_state("networkidle", timeout=15000)
-                page.wait_for_timeout(2000)
-                dismiss_modal(page)
-                log.info("Opened row via click + Enter fallback.")
-                try:
-                    page.wait_for_selector(f"xpath={XP_MDS_MENU}", timeout=10000)
-                    log.info("MDS detail page loaded (MDS menu found).")
-                except:
-                    save_screenshot(page, f"after_doubleclick_fallback_{mds_id_num}.png")
-                    continue
-            except Exception as e2:
-                log.warning(f"Fallback also failed: {e2}")
-                save_screenshot(page, f"failed_open_{mds_id_num}.png")
-                continue
 
         if not reject_mds(page):
             log.warning(f"Rejection failed for MDS {mds_id_num}.")
