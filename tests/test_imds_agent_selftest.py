@@ -27,7 +27,10 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertIn("def accept_passed_mds", text)
         self.assertIn("def reject_failed_mds", text)
         self.assertIn("a:has-text('Login'):visible", text)
-        self.assertIn("Clicked No on previous-version forward prompt", text)
+        self.assertIn("previous-version forward prompt", text)
+        self.assertIn("def is_save_changes_prompt", text)
+        self.assertIn("Save-changes prompt is showing", text)
+        self.assertIn("retrying with all statuses", text)
         self.assertIn("not clicking Ingredients on the leftover sheet", text)
         self.assertNotIn("Looking for Yes button.", text)
         self.assertNotIn('locator("input").first.wait_for(state="visible"', text)
@@ -86,6 +89,15 @@ class ForwardPromptHelpers(unittest.TestCase):
         self.assertTrue(imds_agent_v2.is_forward_previous_version_prompt(text))
         self.assertFalse(imds_agent_v2.is_forward_previous_version_prompt("Clicked Inbox button"))
         self.assertFalse(imds_agent_v2.is_forward_previous_version_prompt("Forward menu"))
+        self.assertFalse(
+            imds_agent_v2.is_forward_previous_version_prompt("Do you want to save your changes?")
+        )
+
+    def test_detects_save_changes_prompt(self):
+        self.assertTrue(imds_agent_v2.is_save_changes_prompt("Do you want to save your changes?"))
+        self.assertTrue(imds_agent_v2.is_save_changes_prompt("MDS - MATERIAL DATA SYSTEM\nDo you want to save your changes?\nYes\nNo\nCancel"))
+        self.assertFalse(imds_agent_v2.is_save_changes_prompt("Do you want to forward the new version as well?"))
+        self.assertFalse(imds_agent_v2.is_save_changes_prompt("Clicked Inbox button"))
 
     def test_mds_id_matches_numeric_id_only(self):
         self.assertTrue(imds_agent_v2.mds_id_matches("1522070544 / 2", "1522070544"))
