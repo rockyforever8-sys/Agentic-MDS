@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Rebuild Agentic_MDS.ipynb from the repo Python sources so Colab stays in sync."""
+"""Write Colab_Start_Here.ipynb and Agentic_MDS.ipynb as the same one-button Colab flow.
+
+Does not %%writefile the agent (original regex uses backslash-open-paren, which Colab splits).
+Cell 1 clones the repo and runs imds_agent_v2.py as a file.
+"""
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+REF = "cursor/original-agent-colab-secrets-07ca"
 
 
 def as_source_lines(text: str) -> list[str]:
@@ -32,58 +37,76 @@ def markdown_cell(source: str, cell_id: str) -> dict:
     }
 
 
-def main() -> None:
-    files = {
-        "imds_decisions.py": ROOT / "imds_decisions.py",
-        "imds_secrets.py": ROOT / "imds_secrets.py",
-        "imds_agent_v2.py": ROOT / "imds_agent_v2.py",
-    }
-    texts = {name: path.read_text(encoding="utf-8") for name, path in files.items()}
-    for name, text in texts.items():
-        if r"\(" in text:
-            raise SystemExit(f"Refusing to embed {name}: backslash-open-paren would break Colab writefile.")
-
-    cells = [
+def cells() -> list[dict]:
+    return [
         markdown_cell(
             """# Agentic MDS — one-button live run
 
 **Do not paste this `.ipynb` file into a code cell.** It is JSON. That causes `NameError: name 'true' is not defined`.
 
-Open it as a notebook instead:
-- [Open in Google Colab](https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/main/Colab_Start_Here.ipynb) (recommended)
-- Or Colab **File → Upload notebook** and select the `.ipynb` file
-- Or Colab **File → New notebook** and paste only the clone cell from `Colab_Start_Here.ipynb`
+Open it as a notebook:
+- [Open Colab_Start_Here.ipynb in Google Colab](https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/cursor/original-agent-colab-secrets-07ca/Colab_Start_Here.ipynb)
+- Or Colab **File → Upload notebook**
 
-Set secrets **once** in Colab 🔑 (left sidebar). They stay in your Google account and are **not** in this public notebook or GitHub.
+This notebook runs the **original IMDS agent** (`imds_agent_v2.py`) — same XPaths and actions that already produced your Excel output. The only change is **secret authentication**: passwords stay in Colab 🔑, not in the script.
 
 | Secret | Purpose |
 |---|---|
 | `IMDS_USERNAME` | IMDS login |
 | `IMDS_PASSWORD` | IMDS password |
-| `OTP_SECRET` | Authenticator TOTP seed |
-| `IMDS_MASTER_KEY` | Passphrase that encrypts the private vault |
+| `OTP_SECRET` | Authenticator TOTP seed (not a Gmail app password) |
+| `IMDS_MASTER_KEY` | Optional passphrase for the encrypted Drive vault |
 
-The agent also writes an encrypted vault to Google Drive `MyDrive/imds_private/credentials.enc` if Drive is mounted, otherwise `~/.imds/credentials.enc`. That file is gitignored.
+Optional: `NUM_ITERATIONS` (default **3**), `RECIPIENT_COMPANY_IDS` (default `9994,293798`).
 
-Then click **Run IMDS until complete**. It processes 10 MDS: **PASS → accept + forward + propose**, **FAIL or amber → reject**, and writes `imds_output/mds_status_report.csv` by MDS ID.""",
+Then click **Run IMDS until complete**. Output: `imds_output/check_summary.xlsx`.""",
             "md-intro",
         ),
         code_cell(
-            "%pip install playwright openpyxl nest_asyncio pyotp cryptography ipywidgets\n"
-            "!playwright install --with-deps chromium",
-            "install",
+            f"""# Cell 1 — clone the original agent and install Chromium OS libraries.
+import os, pathlib, subprocess, sys
+
+ROOT = pathlib.Path("/content/Agentic-MDS")
+REPO = "https://github.com/rockyforever8-sys/Agentic-MDS.git"
+REF = os.environ.get("IMDS_GIT_REF", "{REF}")
+if not (ROOT / ".git").exists():
+    try:
+        subprocess.check_call(["git", "clone", "--depth", "1", "--branch", REF, REPO, str(ROOT)])
+    except subprocess.CalledProcessError:
+        subprocess.check_call(["git", "clone", "--depth", "1", REPO, str(ROOT)])
+else:
+    fetched = False
+    for _ref in (REF, "main"):
+        try:
+            subprocess.check_call(["git", "-C", str(ROOT), "fetch", "--depth", "1", "origin", _ref])
+            subprocess.check_call(["git", "-C", str(ROOT), "checkout", "-B", _ref, f"origin/{{_ref}}"])
+            fetched = True
+            break
+        except subprocess.CalledProcessError:
+            print("Could not fetch origin/" + _ref)
+    if not fetched:
+        raise RuntimeError("git fetch failed")
+os.chdir(ROOT)
+print("Working directory:", os.getcwd())
+print("git HEAD:", subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip())
+
+%pip install -q playwright pandas openpyxl nest_asyncio pyotp cryptography ipywidgets
+!python -m playwright install-deps chromium
+!python -m playwright install chromium
+from pathlib import Path as _P
+print("libatk present:", _P("/usr/lib/x86_64-linux-gnu/libatk-1.0.so.0").exists())
+print("Install done.")""",
+            "clone-install",
         ),
-        code_cell("%%writefile imds_decisions.py\n" + texts["imds_decisions.py"].rstrip() + "\n", "write-decisions"),
-        code_cell("%%writefile imds_secrets.py\n" + texts["imds_secrets.py"].rstrip() + "\n", "write-secrets"),
-        code_cell("%%writefile imds_agent_v2.py\n" + texts["imds_agent_v2.py"].rstrip() + "\n", "write-agent"),
         code_cell(
-            """# Self-test only. No IMDS login and no private passwords required.
+            """# Cell 2 — compile only. No IMDS login.
 !python -m py_compile imds_decisions.py imds_secrets.py imds_agent_v2.py
-!python imds_agent_v2.py --self-test""",
+print("compile OK")""",
             "self-test",
         ),
         code_cell(
-            '''# ONE BUTTON: load private secrets, run until complete, show accept/reject report.
+            '''# Cell 3 — one button. Set Colab Secrets first (key icon, left sidebar).
+# Playwright Sync API cannot start in Colab's asyncio loop; the button runs a subprocess.
 import os
 from pathlib import Path
 from IPython.display import display
@@ -101,7 +124,7 @@ try:
                 os.environ[_key] = val
         except Exception:
             pass
-    if Path("/content/drive/MyDrive").exists() is False:
+    if not Path("/content/drive/MyDrive").exists():
         try:
             drive.mount("/content/drive")
         except Exception:
@@ -109,11 +132,8 @@ try:
 except ImportError:
     pass
 
-os.environ.setdefault("NUM_ITERATIONS", "10")
-os.environ.setdefault("IMDS_AUTO_ACCEPT", "1")
-os.environ.setdefault("IMDS_AUTO_REJECT", "1")
-os.environ.setdefault("IMDS_AUTO_FORWARD", "1")
-os.environ.setdefault("IMDS_HOLD_AMBER", "0")
+os.environ.setdefault("NUM_ITERATIONS", "3")
+os.environ.setdefault("RECIPIENT_COMPANY_IDS", "9994,293798")
 
 from imds_secrets import apply_stored_credentials, missing_secret_keys
 apply_stored_credentials(persist=True)
@@ -134,19 +154,32 @@ def _on_run(_):
         if missing:
             raise RuntimeError(
                 "Private secrets missing: " + ", ".join(missing) +
-                ". Add IMDS_USERNAME, IMDS_PASSWORD, OTP_SECRET, and IMDS_MASTER_KEY in Colab Secrets."
+                ". Add IMDS_USERNAME, IMDS_PASSWORD, OTP_SECRET in Colab Secrets."
             )
-        from imds_agent_v2 import orchestrate
-        rc = orchestrate()
+        import subprocess, sys
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "imds_agent_v2.py"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            bufsize=1,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            print(line, end="")
+        rc = proc.wait()
         print("exit code", rc)
-        report = Path("imds_output/mds_status_report.csv")
+        report = Path("imds_output/check_summary.xlsx")
         if report.exists():
             try:
                 import pandas as pd
                 from IPython.display import display as show
-                show(pd.read_csv(report))
+                show(pd.read_excel(report))
             except Exception:
-                print(report.read_text())
+                print("Wrote", report)
 
 
 run_btn.on_click(_on_run)
@@ -156,19 +189,25 @@ print("Secrets loaded:", not bool(missing_secret_keys()), "| click the green but
         ),
     ]
 
+
+def write_notebook(path: Path) -> None:
     notebook = {
         "nbformat": 4,
-        "nbformat_minor": 0,
+        "nbformat_minor": 5,
         "metadata": {
             "colab": {"provenance": [], "toc_visible": True},
             "kernelspec": {"name": "python3", "display_name": "Python 3"},
             "language_info": {"name": "python"},
         },
-        "cells": cells,
+        "cells": cells(),
     }
-    dest = ROOT / "Agentic_MDS.ipynb"
-    dest.write_text(json.dumps(notebook, indent=2) + "\n", encoding="utf-8")
-    print(f"Wrote {dest} ({dest.stat().st_size} bytes, {len(cells)} cells)")
+    path.write_text(json.dumps(notebook, indent=2) + "\n", encoding="utf-8")
+    print(f"Wrote {path} ({path.stat().st_size} bytes)")
+
+
+def main() -> None:
+    write_notebook(ROOT / "Colab_Start_Here.ipynb")
+    write_notebook(ROOT / "Agentic_MDS.ipynb")
 
 
 if __name__ == "__main__":

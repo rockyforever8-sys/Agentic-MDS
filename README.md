@@ -26,13 +26,11 @@ Speaker notes are timed on every slide.
 
 ## IMDS Colab agent
 
-- **Logic:** [`imds_decisions.py`](imds_decisions.py) (green / amber / red, no Playwright)
+- **Playwright agent (original XPaths):** [`imds_agent_v2.py`](imds_agent_v2.py)
 - **Private secrets:** [`imds_secrets.py`](imds_secrets.py) (Colab 🔑 + encrypted vault, never committed)
-- **Playwright agent:** [`imds_agent_v2.py`](imds_agent_v2.py)
-- **Start in Colab (recommended):** [Open Colab_Start_Here.ipynb](https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/main/Colab_Start_Here.ipynb)
-- **Full notebook:** [`Agentic_MDS.ipynb`](Agentic_MDS.ipynb) — use **File → Upload notebook**. Do **not** paste the `.ipynb` JSON into a code cell (`NameError: true` means that happened).
+- **Start in Colab:** [Open Colab_Start_Here.ipynb](https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/cursor/original-agent-colab-secrets-07ca/Colab_Start_Here.ipynb)
 
-Put `IMDS_USERNAME`, `IMDS_PASSWORD`, `OTP_SECRET`, and `IMDS_MASTER_KEY` in Colab Secrets. They are private to your Google account. The notebook encrypts a vault to Drive `MyDrive/imds_private/credentials.enc` (gitignored).
+Put `IMDS_USERNAME`, `IMDS_PASSWORD`, `OTP_SECRET`, and optional `IMDS_MASTER_KEY` in Colab Secrets. They stay in your Google account. The notebook can encrypt a vault to Drive `MyDrive/imds_private/credentials.enc` (gitignored).
 
 Where to click (key icon in the left sidebar):
 
@@ -40,11 +38,10 @@ Where to click (key icon in the left sidebar):
 
 ```bash
 python -m unittest discover -s tests -v
-python imds_agent_v2.py --self-test   # no IMDS login
-# python imds_agent_v2.py             # live run
+# python imds_agent_v2.py   # live run; needs IMDS_* env or Colab Secrets
 ```
 
-Live default: **10 MDS**. PASS → accept + forward + propose. FAIL **and amber** → reject. Report: `imds_output/mds_status_report.csv` keyed by MDS ID. Kill switch: `IMDS_KILL_SWITCH=1` or `imds_output/KILL`.
+Live default: **3 MDS** (`NUM_ITERATIONS`). Same accept / forward / propose / reject actions as the original working script. Excel: `imds_output/check_summary.xlsx`.
 
 ## Rebuild
 
