@@ -47,6 +47,10 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertIn("Contact already", text)
         self.assertIn("not stripping lookup dialogs", text)
         self.assertIn("def wait_for_check_results", text)
+        self.assertIn("def read_check_results_text", text)
+        self.assertIn("def return_to_inbox_results", text)
+        self.assertIn("Check waiter missed the panel", text)
+        self.assertIn("Continuing with remaining rows", text)
         self.assertIn("Recipient [", text)
         self.assertIn("Contact display value:", text)
         self.assertIn("Propose Failed (Contact must be specified)", text)
@@ -232,6 +236,24 @@ class CompanyLookupHelpers(unittest.TestCase):
                 yes_no=False,
             )
         )
+        pass_text = (
+            "Check results - 0 Error(s) / 0 Warning(s)\n"
+            "The MDS has passed all included checks. These checks do not cover all aspects "
+            "of IMDS data requirements. Further manual review may be required."
+        )
+        self.assertFalse(imds_agent_v2.is_check_errors_blocking_prompt(pass_text))
+        self.assertTrue(imds_agent_v2.is_passing_check_results_text(pass_text))
+        self.assertTrue(imds_agent_v2.is_check_results_overlay_text(pass_text))
+        self.assertFalse(
+            imds_agent_v2.should_js_strip_modal(lookup_iframes=0, dialog_text=pass_text, yes_no=False)
+        )
+        self.assertEqual(
+            imds_agent_v2.preferred_check_result_message(pass_text),
+            "Check results - 0 Error(s) / 0 Warning(s)",
+        )
+        self.assertTrue(imds_agent_v2.is_check_clean(pass_text))
+        self.assertTrue(imds_agent_v2.is_check_clean("0 Error(s), 0 Warning(s)"))
+        self.assertFalse(imds_agent_v2.is_check_clean("Check failed"))
 
     def test_company_id_was_filled(self):
         self.assertTrue(imds_agent_v2.company_id_was_filled("9994", "9994"))
@@ -263,6 +285,8 @@ class CompanyLookupHelpers(unittest.TestCase):
         self.assertTrue(imds_agent_v2.check_results_present("The MDS has passed all included checks."))
         self.assertFalse(imds_agent_v2.check_results_present("Clicked Check item."))
         self.assertFalse(imds_agent_v2.check_results_present(""))
+        self.assertEqual(imds_agent_v2.parse_ui_check_counts("Check results - 0 Error(s) / 0 Warning(s)"), (0, 0))
+        self.assertTrue(imds_agent_v2.is_passing_check_results_text("Check results - 0 Error(s) / 0 Warning(s)"))
 
 
 if __name__ == "__main__":
