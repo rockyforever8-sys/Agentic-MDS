@@ -15,6 +15,8 @@ opens read the leftover ID.
 After Forward, IMDS mints a new own-MDS ID (version 0.01). Contact person,
 Add Recipient, and Propose must finish on that new ID before the next
 received MDS is searched.
+Company lookup uses the newest lookupCompany iframe only. Leftover lookup
+dialogs are Cancelled (never JS-stripped). Do not Search an empty lookup.
 """
 
 import os
@@ -247,6 +249,13 @@ XP_COMPANY_ID_EXACT = [
     "//*[@id='pt1:svSearchCompanyLookup:sfSubLU:it2']/td[2]",
     "//*[@id='pt1:svSearchCompanyLookup:sfSubLU:it2']"
 ]
+LOOKUP_COMPANY_IFRAME = "iframe[src*='lookupCompany']"
+XP_LOOKUP_CANCEL = [
+    "//*[@id='pt1:svSearchCompanyLookup:ctbCancel']/a/span",
+    "//*[@id='pt1:svSearchCompanyLookup:ctbCancel']/a",
+    "//*[@id='pt1:svSearchCompanyLookup:ctbCancel']",
+    "//*[contains(@id,'ctbCancel')]/a/span[normalize-space()='Cancel']",
+]
 
 # ---------- XPaths for filter in acceptance phase ----------
 XP_FILTER_NONE = "//*[@id='pt1:dcCmds:sfIbLU:cbNone']/a"
@@ -284,6 +293,64 @@ def is_save_changes_prompt(text: str) -> bool:
     """True for the ADF 'Do you want to save your changes?' Yes/No/Cancel dialog."""
     t = " ".join((text or "").lower().split())
     return "save your changes" in t or "do you want to save" in t
+
+
+def is_empty_search_criteria_prompt(text: str) -> bool:
+    """True for IMDS 'Please enter at least one search criteria!' on an empty lookup."""
+    t = " ".join((text or "").lower().split())
+    return "at least one search criteria" in t or "enter at least one search" in t
+
+
+def recipient_id_in_text(tree_text: str, company_id: str) -> bool:
+    """True when the recipient tree already lists this company ID, e.g. [9994]."""
+    cid = (company_id or "").strip()
+    if not cid:
+        return False
+    return f"[{cid}]" in (tree_text or "")
+
+
+def contact_name_matches(control_text: str, contact_name: str) -> bool:
+    """True when Supplier Data already shows the contact (span or select label)."""
+    hay = " ".join((control_text or "").lower().split())
+    needle = (contact_name or "").strip().lower()
+    if not hay or not needle:
+        return False
+    if needle in hay:
+        return True
+    last = needle.split(",")[0].strip()
+    return bool(last) and last in hay
+
+
+def company_id_was_filled(filled_value, company_id: str) -> bool:
+    """True only when the lookup Company ID input actually holds the ID we typed."""
+    if filled_value is None or company_id is None:
+        return False
+    return str(filled_value).strip() == str(company_id).strip() and bool(str(company_id).strip())
+
+
+def should_js_strip_modal(*, lookup_iframes: int, dialog_text: str = "", yes_no: bool = False) -> bool:
+    """JS-removing ADF glass panes leaves lookup iframes stacked. Never strip those."""
+    if lookup_iframes > 0:
+        return False
+    if yes_no:
+        return False
+    if is_save_changes_prompt(dialog_text) or is_forward_previous_version_prompt(dialog_text):
+        return False
+    if is_empty_search_criteria_prompt(dialog_text):
+        return False
+    return True
+
+
+def check_results_present(text: str) -> bool:
+    """True when Check has produced a result, even if the Message header table is hidden."""
+    t = text or ""
+    if re.search(r"\d+\s*Error\(s\)\s*/\s*\d+\s*Warning\(s\)", t):
+        return True
+    if "passed all included checks" in t.lower():
+        return True
+    if "check results" in t.lower() and re.search(r"error\(s\)", t, re.I):
+        return True
+    return False
 
 
 def parse_mds_id_number(visible: str | None) -> str:
@@ -569,15 +636,145 @@ def yes_no_buttons_visible(page) -> bool:
         return False
 
 
+def lookup_company_iframe_count(page) -> int:
+    try:
+        return page.locator(LOOKUP_COMPANY_IFRAME).count()
+    except Exception:
+        return 0
+
+
+def last_lookup_company_frame(page):
+    """Return the newest lookupCompany iframe frame. Stacked dialogs must not use .first."""
+    loc = page.locator(LOOKUP_COMPANY_IFRAME)
+    try:
+        n = loc.count()
+    except Exception:
+        n = 0
+    if n <= 0:
+        return None
+    log.info(f"Using newest lookupCompany iframe ({n} present).")
+    try:
+        return loc.last.content_frame
+    except Exception:
+        return None
+
+
+def wait_for_last_lookup_company_frame(page, timeout_ms: int = 15000):
+    deadline = time.time() + timeout_ms / 1000.0
+    last_err = None
+    while time.time() < deadline:
+        loc = page.locator(LOOKUP_COMPANY_IFRAME)
+        try:
+            n = loc.count()
+        except Exception as e:
+            last_err = e
+            n = 0
+        if n > 0:
+            try:
+                frame = loc.last.content_frame
+                if frame:
+                    frame.locator("body").wait_for(timeout=2500)
+                    log.info(f"Found the lookupCompany iframe (newest of {n}).")
+                    return frame
+            except Exception as e:
+                last_err = e
+        page.wait_for_timeout(250)
+    log.warning(f"Could not find lookupCompany iframe: {last_err}")
+    return None
+
+
+def _click_cancel_in_frame(frame) -> bool:
+    for xp in XP_LOOKUP_CANCEL:
+        try:
+            btn = frame.locator(f"xpath={xp}").first
+            if btn.count() > 0:
+                btn.click(force=True, timeout=3000)
+                return True
+        except Exception:
+            continue
+    for sel in (
+        "a:has-text('Cancel'):visible",
+        "span:has-text('Cancel'):visible",
+        "button:has-text('Cancel'):visible",
+        "input[value='Cancel']:visible",
+    ):
+        try:
+            btn = frame.locator(sel).first
+            if btn.count() > 0:
+                btn.click(force=True, timeout=3000)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def close_company_lookup_dialogs(page, max_rounds: int = 8) -> bool:
+    """Cancel leftover company-lookup dialogs. Never JS-strip them."""
+    for _ in range(max_rounds):
+        dialog_text = visible_dialog_text(page)
+        if is_empty_search_criteria_prompt(dialog_text):
+            used = _click_first_matching(
+                page,
+                [
+                    "#pt1\\:pt_dcud\\:ctbOk",
+                    "#pt1\\:pt_dcud\\:ctbOk > a > span",
+                    "button:has-text('OK'):visible",
+                    "input[value='OK']:visible",
+                    "a:has-text('OK'):visible",
+                    "span:has-text('OK'):visible",
+                ],
+            )
+            if used:
+                log.info(f"Clicked OK on empty search-criteria prompt via {used}")
+                page.wait_for_timeout(800)
+                continue
+        n = lookup_company_iframe_count(page)
+        if n <= 0:
+            return True
+        log.info(f"Cancelling leftover company lookup ({n} iframe(s)).")
+        frame = last_lookup_company_frame(page)
+        clicked = False
+        if frame is not None:
+            clicked = _click_cancel_in_frame(frame)
+        if not clicked:
+            used = _click_first_matching(
+                page,
+                list(XP_LOOKUP_CANCEL)
+                + [
+                    "a:has-text('Cancel'):visible",
+                    "span:has-text('Cancel'):visible",
+                    "button:has-text('Cancel'):visible",
+                    "input[value='Cancel']:visible",
+                ],
+            )
+            clicked = bool(used)
+            if used:
+                log.info(f"Clicked Cancel on company lookup via {used}")
+        page.wait_for_timeout(800)
+        if lookup_company_iframe_count(page) < n:
+            continue
+        if not clicked:
+            break
+    leftover = lookup_company_iframe_count(page)
+    if leftover > 0:
+        log.warning(
+            f"{leftover} lookupCompany iframe(s) still present; not stripping lookup dialogs via JavaScript."
+        )
+        return False
+    return True
+
+
 def wait_for_glass_pane_clear(page, timeout_ms: int = 8000, allow_escape: bool = True) -> bool:
     """Dismiss leftover IMDS dialogs so they cannot intercept later clicks."""
     deadline = time.time() + timeout_ms / 1000.0
     while time.time() < deadline:
-        if not modal_dialog_visible(page):
+        if lookup_company_iframe_count(page) > 0:
+            close_company_lookup_dialogs(page)
+        if not modal_dialog_visible(page) and lookup_company_iframe_count(page) == 0:
             return True
         dismiss_modal(page, allow_escape=allow_escape)
         page.wait_for_timeout(400)
-    return not modal_dialog_visible(page)
+    return not modal_dialog_visible(page) and lookup_company_iframe_count(page) == 0
 
 
 def read_visible_mds_id(page) -> str | None:
@@ -643,6 +840,11 @@ def ingredients_tree_ready(page) -> bool:
 
 def dismiss_modal(page, allow_escape: bool = True):
     log.info("Attempting to dismiss modal...")
+    if lookup_company_iframe_count(page) > 0:
+        log.info("Company lookup dialog is open; cancelling leftover lookup instead of stripping it.")
+        close_company_lookup_dialogs(page)
+        if lookup_company_iframe_count(page) == 0 and not modal_dialog_visible(page):
+            return True
     if not modal_dialog_visible(page):
         log.info("No glass pane, no modal.")
         return True
@@ -672,6 +874,23 @@ def dismiss_modal(page, allow_escape: bool = True):
             return True
         return False
 
+    if is_empty_search_criteria_prompt(dialog_text):
+        log.info("Empty search-criteria prompt is showing; clicking OK then cancelling the lookup.")
+        used = _click_first_matching(
+            page,
+            [
+                "#pt1\\:pt_dcud\\:ctbOk",
+                "#pt1\\:pt_dcud\\:ctbOk > a > span",
+                "button:has-text('OK'):visible",
+                "input[value='OK']:visible",
+            ],
+        )
+        if used:
+            log.info(f"Clicked modal button: {used}")
+            page.wait_for_timeout(800)
+        close_company_lookup_dialogs(page)
+        return lookup_company_iframe_count(page) == 0
+
     for selector in [
         "#pt1\\:pt_dcud\\:ctbOk",
         "#pt1\\:pt_dcud\\:ctbOk > a > span",
@@ -687,7 +906,9 @@ def dismiss_modal(page, allow_escape: bool = True):
                 btn.click(force=True)
                 log.info(f"Clicked modal button: {selector}")
                 page.wait_for_timeout(1000)
-                if not modal_dialog_visible(page):
+                if lookup_company_iframe_count(page) > 0:
+                    close_company_lookup_dialogs(page)
+                if not modal_dialog_visible(page) and lookup_company_iframe_count(page) == 0:
                     return True
         except Exception:
             continue
@@ -695,6 +916,11 @@ def dismiss_modal(page, allow_escape: bool = True):
     if yes_no_buttons_visible(page):
         log.warning("Yes/No dialog still showing; not clicking the glass pane or stripping it.")
         return False
+
+    if lookup_company_iframe_count(page) > 0:
+        log.warning("Leaving company lookup in place rather than clicking the glass pane.")
+        close_company_lookup_dialogs(page)
+        return lookup_company_iframe_count(page) == 0
 
     try:
         if glass.count() > 0 and glass.first.is_visible():
@@ -720,6 +946,15 @@ def dismiss_modal(page, allow_escape: bool = True):
         log.warning("Leaving Yes/No save/forward dialog in place; JS strip would freeze the MDS sheet.")
         return False
 
+    lookup_n = lookup_company_iframe_count(page)
+    if not should_js_strip_modal(
+        lookup_iframes=lookup_n,
+        dialog_text=visible_dialog_text(page),
+        yes_no=yes_no_buttons_visible(page),
+    ):
+        log.warning("Not stripping lookup dialogs via JavaScript.")
+        return False
+
     try:
         page.evaluate("""
             () => {
@@ -741,6 +976,7 @@ def dismiss_modal(page, allow_escape: bool = True):
 # ---------- Navigate to Search Page ----------
 def navigate_to_search_page(page):
     log.info("Navigating to Received MDSs search page...")
+    close_company_lookup_dialogs(page)
     if on_public_login_page(page):
         log.warning("Session is on the public login page; logging in again.")
         imds_login(page)
@@ -1360,13 +1596,44 @@ def run_check(page):
             log.warning("Check item not found.")
             return False
 
-        page.wait_for_selector("table:has-text('Message')", timeout=15000)
-        log.info("Check results appeared.")
-        dismiss_modal(page)
-        return True
+        if wait_for_check_results(page, timeout_ms=45000):
+            log.info("Check results appeared.")
+            dismiss_modal(page)
+            return True
+        log.warning("Check results did not appear (no Error(s)/Warning(s) text).")
+        return False
     except Exception as e:
         log.warning(f"Check failed: {e}")
         return False
+
+def wait_for_check_results(page, timeout_ms: int = 45000) -> bool:
+    """Wait for Check output. The Message header table is often hidden (pt1:dcCheck:tChkRes::ch::t)."""
+    deadline = time.time() + timeout_ms / 1000.0
+    while time.time() < deadline:
+        try:
+            body = page.locator("body").text_content(timeout=1000) or ""
+        except Exception:
+            body = ""
+        if check_results_present(body):
+            return True
+        try:
+            panel = page.locator("#pt1\\:dcCheck, [id*='dcCheck']").first
+            if panel.count() > 0:
+                panel_text = panel.text_content(timeout=500) or ""
+                if check_results_present(panel_text):
+                    return True
+        except Exception:
+            pass
+        try:
+            attached = page.locator("table:has-text('Check results')").first
+            if attached.count() > 0:
+                txt = attached.text_content(timeout=500) or ""
+                if check_results_present(txt) or "check results" in txt.lower():
+                    return True
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+    return False
 
 def extract_check_result(page):
     try:
@@ -1895,6 +2162,30 @@ def select_contact_person(page, contact_name="Qu, Theresa"):
     """Select the supplier contact on the forwarded *own* MDS (ADF select is often not Playwright-visible)."""
     log.info(f"Selecting contact person: {contact_name}")
 
+    def _control_text(loc) -> str:
+        if loc is None:
+            return ""
+        for reader in ("inner_text", "text_content"):
+            try:
+                text = getattr(loc, reader)(timeout=800)
+                if text and str(text).strip():
+                    return str(text)
+            except Exception:
+                continue
+        try:
+            return str(loc.evaluate(
+                """el => {
+                    if (!el) return '';
+                    if (el.options && el.selectedIndex >= 0) {
+                        const opt = el.options[el.selectedIndex];
+                        return opt ? (opt.text || '') : '';
+                    }
+                    return el.textContent || el.innerText || '';
+                }"""
+            ) or "")
+        except Exception:
+            return ""
+
     def _first_select():
         for xp in XP_CONTACT_SELECTORS:
             loc = page.locator(f"xpath={xp}").first
@@ -1913,19 +2204,15 @@ def select_contact_person(page, contact_name="Qu, Theresa"):
 
     def _selected() -> bool:
         sel = _first_select()
-        if sel is None:
-            return False
+        if sel is not None and contact_name_matches(_control_text(sel), contact_name):
+            return True
         try:
-            label = sel.evaluate(
-                """el => {
-                    if (!el || !el.options) return '';
-                    const opt = el.options[el.selectedIndex];
-                    return opt ? (opt.text || '') : '';
-                }"""
-            )
-            return bool(label) and contact_name.split(",")[0].lower() in str(label).lower()
+            content = page.locator("xpath=//*[@id='pt1:dcSupp:socContact::content']").first
+            if content.count() > 0 and contact_name_matches(_control_text(content), contact_name):
+                return True
         except Exception:
-            return False
+            pass
+        return False
 
     try:
         dropdown = _first_select()
@@ -1946,13 +2233,26 @@ def select_contact_person(page, contact_name="Qu, Theresa"):
                 log.warning("Contact dropdown not found after all fallbacks.")
                 return False
 
+        if _selected():
+            log.info(f"Contact already {contact_name}; skipping re-select.")
+            save_screenshot(page, "after_contact_selection.png")
+            return True
+
         try:
-            dropdown.select_option(label=contact_name, timeout=4000)
-            log.info(f"Selected {contact_name} via select_option")
-            page.wait_for_timeout(400)
-            if _selected():
-                save_screenshot(page, "after_contact_selection.png")
-                return True
+            tag = ""
+            try:
+                tag = (dropdown.evaluate("el => (el && el.tagName) || ''") or "").lower()
+            except Exception:
+                tag = ""
+            if tag == "select":
+                dropdown.select_option(label=contact_name, timeout=4000)
+                log.info(f"Selected {contact_name} via select_option")
+                page.wait_for_timeout(400)
+                if _selected():
+                    save_screenshot(page, "after_contact_selection.png")
+                    return True
+            else:
+                log.info("Contact control is not a <select>; skipping select_option.")
         except Exception as e:
             log.warning(f"select_option failed: {e}")
 
@@ -2097,8 +2397,151 @@ def _click_add_recipient(page) -> bool:
     return False
 
 
+def _recipient_already_on_sheet(page, company_id: str) -> bool:
+    cid = (company_id or "").strip()
+    if not cid:
+        return False
+    try:
+        loc = page.locator(f"text=[{cid}]")
+        if loc.count() > 0:
+            return True
+    except Exception:
+        pass
+    try:
+        body = page.locator("body").text_content(timeout=2000) or ""
+        return recipient_id_in_text(body, cid)
+    except Exception:
+        return False
+
+
+def _propose_button_enabled(page) -> bool:
+    try:
+        btn = page.locator(f"xpath={XP_PROPOSE}").first
+        if btn.count() == 0:
+            btn = page.locator("a:has-text('Propose'):visible, button:has-text('Propose'):visible").first
+        if btn.count() == 0:
+            return False
+        cls = (btn.get_attribute("class") or "") + " " + (btn.get_attribute("aria-disabled") or "")
+        if "p_AFDisabled" in cls or "disabled" in cls.lower():
+            return False
+        try:
+            if not btn.is_enabled():
+                return False
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def _fill_supplier_part_and_propose(page, company_id, supplier_code, part_no):
+    """Fill recipient codes and Propose after the company lookup is gone."""
+    if supplier_code and supplier_code.strip() not in ['', '-']:
+        try:
+            supp_code_field = page.locator("xpath=//*[@id='pt1:dcReci:itSuppCode::content']")
+            if supp_code_field.count() > 0:
+                wait_for_glass_pane_clear(page, timeout_ms=4000)
+                supp_code_field.click(force=True, timeout=8000)
+                supp_code_field.fill("")
+                supp_code_field.fill(supplier_code)
+                log.info(f"Filled Supplier Code: {supplier_code}")
+        except Exception as e:
+            log.warning(f"Error filling Supplier Code: {e}")
+            try:
+                page.locator("xpath=//*[@id='pt1:dcReci:itSuppCode::content']").fill(supplier_code, force=True, timeout=5000)
+                log.info(f"Filled Supplier Code via force fill: {supplier_code}")
+            except Exception as e2:
+                log.warning(f"Force fill Supplier Code also failed: {e2}")
+    else:
+        log.warning("No valid Supplier Code to fill.")
+
+    if part_no and part_no.strip():
+        try:
+            part_field = page.locator("xpath=//*[@id='pt1:dcReci:itprodCode::content']")
+            if part_field.count() > 0:
+                wait_for_glass_pane_clear(page, timeout_ms=4000)
+                part_field.click(force=True, timeout=8000)
+                part_field.fill("")
+                part_field.fill(part_no)
+                log.info(f"Filled Part/Item No.: {part_no}")
+                save_screenshot(page, f"after_fill_part_no_{company_id}.png")
+        except Exception as e:
+            log.warning(f"Error filling Part/Item No.: {e}")
+            try:
+                page.locator("xpath=//*[@id='pt1:dcReci:itprodCode::content']").fill(part_no, force=True, timeout=5000)
+                log.info(f"Filled Part/Item No. via force fill: {part_no}")
+                save_screenshot(page, f"after_fill_part_no_{company_id}.png")
+            except Exception as e2:
+                log.warning(f"Force fill Part/Item No. also failed: {e2}")
+    else:
+        log.warning("No Part/Item No. to fill.")
+
+    wait_for_glass_pane_clear(page, timeout_ms=5000)
+    try:
+        propose_btn = page.locator(f"xpath={XP_PROPOSE}")
+        if propose_btn.count() == 0:
+            propose_btn = page.locator("button:has-text('Propose'):visible").first
+        if propose_btn.count() > 0 and propose_btn.is_visible():
+            propose_btn.click(force=True)
+            log.info("Clicked Propose button.")
+            save_screenshot(page, f"after_click_propose_{company_id}.png")
+            page.wait_for_timeout(2000)
+        else:
+            log.warning("Propose button not found.")
+            return "Propose Failed"
+    except Exception as e:
+        log.warning(f"Error clicking Propose: {e}")
+        return "Propose Failed"
+
+    try:
+        propose_modal_btn = page.locator(f"xpath={XP_PROPOSE_MODAL}")
+        if propose_modal_btn.count() > 0 and propose_modal_btn.is_visible():
+            propose_modal_btn.click(force=True)
+            log.info("Clicked Propose on confirmation modal (exact XPath).")
+            page.wait_for_timeout(2000)
+            try:
+                page.wait_for_selector(".AFModalGlassPane", state="detached", timeout=10000)
+                log.info("Propose modal dismissed.")
+            except Exception:
+                log.warning("Propose modal glass pane did not detach; dismissing without JS strip.")
+                dismiss_modal(page, allow_escape=False)
+            save_screenshot(page, f"after_propose_modal_{company_id}.png")
+        else:
+            log.warning("Propose modal button not found via exact XPath; trying fallback.")
+            modal_propose = page.locator("button:has-text('Propose'):visible, input[value='Propose']:visible").first
+            if modal_propose.count() > 0 and modal_propose.is_visible():
+                modal_propose.click(force=True)
+                log.info("Clicked Propose on modal (fallback button).")
+                page.wait_for_timeout(2000)
+                try:
+                    page.wait_for_selector(".AFModalGlassPane", state="detached", timeout=10000)
+                    log.info("Propose modal dismissed.")
+                except Exception:
+                    log.warning("Propose modal glass pane did not detach; dismissing without JS strip.")
+                    dismiss_modal(page, allow_escape=False)
+                save_screenshot(page, f"after_propose_modal_{company_id}.png")
+            else:
+                ok_btn = page.locator("button:has-text('OK'):visible, input[value='OK']:visible, #pt1\\:pt_dcud\\:ctbOk").first
+                if ok_btn.count() > 0 and ok_btn.is_visible():
+                    ok_btn.click(force=True)
+                    log.info("Clicked OK on modal.")
+                    page.wait_for_timeout(2000)
+                    save_screenshot(page, f"after_propose_modal_ok_{company_id}.png")
+                else:
+                    log.warning("Modal buttons not found; dismissing modal.")
+                    dismiss_modal(page)
+                    save_screenshot(page, f"after_propose_modal_dismiss_{company_id}.png")
+    except Exception as e:
+        log.warning(f"Error handling propose modal: {e}")
+        dismiss_modal(page)
+
+    save_screenshot(page, f"after_recipient_{company_id}.png")
+    return None
+
+
 def complete_forward_recipients(page, supplier_code, part_no):
     log.info("Completing recipient assignment for forwarded MDS...")
+    close_company_lookup_dialogs(page)
     wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False)
 
     contact_ok = False
@@ -2121,7 +2564,24 @@ def complete_forward_recipients(page, supplier_code, part_no):
 
     def add_recipient(company_id):
         log.info(f"Adding recipient with Company ID: {company_id}")
+        close_company_lookup_dialogs(page)
         wait_for_glass_pane_clear(page, timeout_ms=4000, allow_escape=False)
+
+        if _recipient_already_on_sheet(page, company_id):
+            log.info(
+                f"Recipient [{company_id}] already on this MDS; not opening another company lookup."
+            )
+            if not _propose_button_enabled(page):
+                log.info(f"Propose is inactive; treating {company_id} as already proposed.")
+                return None
+            try:
+                node = page.locator(f"text=[{company_id}]").first
+                if node.count() > 0:
+                    node.click(force=True, timeout=4000)
+                    page.wait_for_timeout(500)
+            except Exception:
+                pass
+            return _fill_supplier_part_and_propose(page, company_id, supplier_code, part_no)
 
         # 1. Click Add Recipient
         if not _click_add_recipient(page):
@@ -2134,28 +2594,22 @@ def complete_forward_recipients(page, supplier_code, part_no):
         except Exception as e:
             log.warning(f"Modal glass pane did not appear: {e}")
 
-        # 3. Use page.frame_locator for the lookupCompany iframe
-        try:
-            frame_locator = page.frame_locator("iframe[src*='lookupCompany']")
-            # Wait for the iframe body to be present
-            frame_locator.locator("body").wait_for(timeout=15000)
-            log.info("Found the lookupCompany iframe.")
-        except Exception as e:
-            log.warning(f"Could not find lookupCompany iframe: {e}")
-            # Fallback: try to use content_frame
+        # 3. Use the newest lookupCompany iframe (stacked dialogs must not use .first)
+        iframes_before = lookup_company_iframe_count(page)
+        frame_locator = wait_for_last_lookup_company_frame(page, timeout_ms=15000)
+        if frame_locator is None:
             try:
-                iframe_locator = page.locator("iframe:visible").first
+                iframe_locator = page.locator("iframe:visible").last
                 if iframe_locator.count() > 0:
-                    frame = iframe_locator.content_frame
-                    if frame:
-                        frame_locator = frame
-                        log.info("Fallback: using first visible iframe.")
-            except:
-                pass
-            if 'frame_locator' not in locals():
-                log.warning("No iframe found; cannot proceed.")
-                save_screenshot(page, "no_iframe.png")
-                return "Recipient lookup Failed"
+                    frame_locator = iframe_locator.content_frame
+                    log.info("Fallback: using last visible iframe.")
+            except Exception:
+                frame_locator = None
+        if frame_locator is None:
+            log.warning("No iframe found; cannot proceed.")
+            save_screenshot(page, "no_iframe.png")
+            close_company_lookup_dialogs(page)
+            return "Recipient lookup Failed"
 
         # 4. Locate the Company ID field (do not wait on input.first — ADF's first
         # input is a hidden RICH_UPDATE token and burns 10s every lookup).
@@ -2262,9 +2716,11 @@ def complete_forward_recipients(page, supplier_code, part_no):
         if company_field is None or company_field.count() == 0:
             log.warning("Company ID field not found after all strategies.")
             save_screenshot(page, "company_id_not_found.png")
+            close_company_lookup_dialogs(page)
             return "Recipient lookup Failed"
 
         # 5. Fill the Company ID
+        filled_value = ""
         try:
             company_field.click()
             company_field.fill("")
@@ -2276,6 +2732,13 @@ def complete_forward_recipients(page, supplier_code, part_no):
                 log.warning(f"Value mismatch: filled {company_id}, but input has {filled_value}")
         except Exception as e:
             log.warning(f"Error filling Company ID: {e}")
+            close_company_lookup_dialogs(page)
+            return "Recipient lookup Failed"
+
+        if not company_id_was_filled(filled_value, company_id):
+            log.warning(f"Company ID not filled (got {filled_value!r}); not clicking Search.")
+            save_screenshot(page, f"company_id_not_filled_{company_id}.png")
+            close_company_lookup_dialogs(page)
             return "Recipient lookup Failed"
 
         # 6. Click Search button inside iframe
@@ -2291,9 +2754,16 @@ def complete_forward_recipients(page, supplier_code, part_no):
                 page.wait_for_timeout(2000)
             else:
                 log.warning("Search button not found.")
+                close_company_lookup_dialogs(page)
                 return "Recipient lookup Failed"
         except Exception as e:
             log.warning(f"Error clicking Search: {e}")
+            close_company_lookup_dialogs(page)
+            return "Recipient lookup Failed"
+
+        if is_empty_search_criteria_prompt(visible_dialog_text(page)):
+            log.warning("Search ran without criteria; cancelling lookup.")
+            close_company_lookup_dialogs(page)
             return "Recipient lookup Failed"
 
         # 7. Click Apply button inside iframe
@@ -2333,133 +2803,25 @@ def complete_forward_recipients(page, supplier_code, part_no):
                 page.wait_for_timeout(1500)
             except Exception as e2:
                 log.warning(f"JavaScript fallback also failed: {e2}")
+                close_company_lookup_dialogs(page)
                 return "Recipient lookup Failed"
 
-        # 8. Wait for iframe to close
-        try:
-            page.wait_for_selector("iframe[src*='lookupCompany']", state="detached", timeout=15000)
-            log.info("Iframe closed after Apply.")
-        except:
-            log.warning("Iframe did not detach; dismissing modal.")
-            dismiss_modal(page)
+        # 8. Wait for this lookup iframe to close (stale iframes may remain until Cancel)
+        closed = False
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            n = lookup_company_iframe_count(page)
+            if n == 0 or n < iframes_before:
+                log.info("Iframe closed after Apply.")
+                closed = True
+                break
+            page.wait_for_timeout(400)
+        if not closed:
+            log.warning("Iframe did not detach; cancelling leftover lookup.")
+            close_company_lookup_dialogs(page)
         wait_for_glass_pane_clear(page, timeout_ms=8000)
 
-        # 9. Fill Supplier Code and Part/Item No.
-        if supplier_code and supplier_code.strip() not in ['', '-']:
-            try:
-                supp_code_field = page.locator("xpath=//*[@id='pt1:dcReci:itSuppCode::content']")
-                if supp_code_field.count() > 0:
-                    wait_for_glass_pane_clear(page, timeout_ms=4000)
-                    supp_code_field.click(force=True, timeout=8000)
-                    supp_code_field.fill("")
-                    supp_code_field.fill(supplier_code)
-                    log.info(f"Filled Supplier Code: {supplier_code}")
-            except Exception as e:
-                log.warning(f"Error filling Supplier Code: {e}")
-                try:
-                    page.locator("xpath=//*[@id='pt1:dcReci:itSuppCode::content']").fill(supplier_code, force=True, timeout=5000)
-                    log.info(f"Filled Supplier Code via force fill: {supplier_code}")
-                except Exception as e2:
-                    log.warning(f"Force fill Supplier Code also failed: {e2}")
-        else:
-            log.warning("No valid Supplier Code to fill.")
-
-        if part_no and part_no.strip():
-            try:
-                part_field = page.locator("xpath=//*[@id='pt1:dcReci:itprodCode::content']")
-                if part_field.count() > 0:
-                    wait_for_glass_pane_clear(page, timeout_ms=4000)
-                    part_field.click(force=True, timeout=8000)
-                    part_field.fill("")
-                    part_field.fill(part_no)
-                    log.info(f"Filled Part/Item No.: {part_no}")
-                    save_screenshot(page, f"after_fill_part_no_{company_id}.png")
-            except Exception as e:
-                log.warning(f"Error filling Part/Item No.: {e}")
-                try:
-                    page.locator("xpath=//*[@id='pt1:dcReci:itprodCode::content']").fill(part_no, force=True, timeout=5000)
-                    log.info(f"Filled Part/Item No. via force fill: {part_no}")
-                    save_screenshot(page, f"after_fill_part_no_{company_id}.png")
-                except Exception as e2:
-                    log.warning(f"Force fill Part/Item No. also failed: {e2}")
-        else:
-            log.warning("No Part/Item No. to fill.")
-
-        # 10. Click Propose
-        wait_for_glass_pane_clear(page, timeout_ms=5000)
-        try:
-            propose_btn = page.locator(f"xpath={XP_PROPOSE}")
-            if propose_btn.count() == 0:
-                propose_btn = page.locator("button:has-text('Propose'):visible").first
-            if propose_btn.count() > 0 and propose_btn.is_visible():
-                propose_btn.click(force=True)
-                log.info("Clicked Propose button.")
-                save_screenshot(page, f"after_click_propose_{company_id}.png")
-                page.wait_for_timeout(2000)
-            else:
-                log.warning("Propose button not found.")
-                return "Propose Failed"
-        except Exception as e:
-            log.warning(f"Error clicking Propose: {e}")
-            return "Propose Failed"
-
-        # 11. Handle confirmation modal – using exact XPath for the Propose button inside the modal
-        try:
-            propose_modal_btn = page.locator(f"xpath={XP_PROPOSE_MODAL}")
-            if propose_modal_btn.count() > 0 and propose_modal_btn.is_visible():
-                propose_modal_btn.click(force=True)
-                log.info("Clicked Propose on confirmation modal (exact XPath).")
-                page.wait_for_timeout(2000)
-                try:
-                    page.wait_for_selector(".AFModalGlassPane", state="detached", timeout=10000)
-                    log.info("Propose modal dismissed.")
-                except:
-                    log.warning("Modal glass pane did not detach; forcing cleanup.")
-                    page.evaluate("""
-                        () => {
-                            document.querySelectorAll('.AFModalGlassPane').forEach(el => el.remove());
-                            document.querySelectorAll('.AFModalDialog').forEach(el => el.style.display = 'none');
-                        }
-                    """)
-                    page.wait_for_timeout(1000)
-                save_screenshot(page, f"after_propose_modal_{company_id}.png")
-            else:
-                log.warning("Propose modal button not found via exact XPath; trying fallback.")
-                modal_propose = page.locator("button:has-text('Propose'):visible, input[value='Propose']:visible").first
-                if modal_propose.count() > 0 and modal_propose.is_visible():
-                    modal_propose.click(force=True)
-                    log.info("Clicked Propose on modal (fallback button).")
-                    page.wait_for_timeout(2000)
-                    try:
-                        page.wait_for_selector(".AFModalGlassPane", state="detached", timeout=10000)
-                        log.info("Propose modal dismissed.")
-                    except:
-                        log.warning("Modal glass pane did not detach; forcing cleanup.")
-                        page.evaluate("""
-                            () => {
-                                document.querySelectorAll('.AFModalGlassPane').forEach(el => el.remove());
-                                document.querySelectorAll('.AFModalDialog').forEach(el => el.style.display = 'none');
-                            }
-                        """)
-                        page.wait_for_timeout(1000)
-                    save_screenshot(page, f"after_propose_modal_{company_id}.png")
-                else:
-                    ok_btn = page.locator("button:has-text('OK'):visible, input[value='OK']:visible, #pt1\\:pt_dcud\\:ctbOk").first
-                    if ok_btn.count() > 0 and ok_btn.is_visible():
-                        ok_btn.click(force=True)
-                        log.info("Clicked OK on modal.")
-                        page.wait_for_timeout(2000)
-                        save_screenshot(page, f"after_propose_modal_ok_{company_id}.png")
-                    else:
-                        log.warning("Modal buttons not found; dismissing modal.")
-                        dismiss_modal(page)
-                        save_screenshot(page, f"after_propose_modal_dismiss_{company_id}.png")
-        except Exception as e:
-            log.warning(f"Error handling propose modal: {e}")
-            dismiss_modal(page)
-
-        save_screenshot(page, f"after_recipient_{company_id}.png")
-        return None
+        return _fill_supplier_part_and_propose(page, company_id, supplier_code, part_no)
 
     proposed = []
     failures = []
@@ -2589,7 +2951,9 @@ def wait_for_mds_content_page(page, expected_id: str | None = None) -> bool:
     'still loading', not a leftover sheet. Only a *different* numeric ID is a
     mismatch. Do not click Ingredients just because the ID is not parsed yet —
     that interrupted the open in Colab and produced 'Opened MDS None'.
+    Do not click Ingredients on a leftover own MDS whose ID already differs.
     """
+    close_company_lookup_dialogs(page)
     dismiss_modal(page, allow_escape=False)
     last_id = None
     last_status = "unknown"
@@ -2627,17 +2991,23 @@ def wait_for_mds_content_page(page, expected_id: str | None = None) -> bool:
                 break
             if last_status == "mismatch":
                 continue
-            log.info(
-                f"Ingredients tree is open; ID/Version not parsed yet "
-                f"(expected {expected_id}). Continuing without requiring a full ID/Version string."
-            )
-            break
+            if not expected_id:
+                log.info(
+                    f"Ingredients tree is open; ID/Version not parsed yet "
+                    f"(expected {expected_id}). Continuing without requiring a full ID/Version string."
+                )
+                break
         page.wait_for_timeout(400)
     else:
         if last_status == "mismatch":
             log.warning(f"Opened MDS {last_id} does not match expected ID {expected_id}.")
             save_screenshot(page, "mds_id_mismatch.png")
             return False
+
+    if last_status == "mismatch":
+        log.warning(f"Opened MDS {last_id} does not match expected ID {expected_id}.")
+        save_screenshot(page, "mds_id_mismatch.png")
+        return False
 
     click_ingredients_tab(page)
     landmarks = [
@@ -2865,6 +3235,7 @@ def accept_passed_mds(page, results):
                 f"Propose cycle {cycle}/3 incomplete on the forwarded own MDS "
                 f"({recipient_msg}); retrying here, not searching received ID {mds_id_num}."
             )
+            close_company_lookup_dialogs(page)
             dismiss_modal(page, allow_escape=False)
             wait_for_glass_pane_clear(page, timeout_ms=4000, allow_escape=False)
         if ok:

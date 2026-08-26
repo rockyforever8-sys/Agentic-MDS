@@ -40,6 +40,17 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertIn("Action Result", text)
         self.assertIn("DEFAULT_NUM_ITERATIONS = 10", text)
         self.assertIn("def resolve_num_iterations", text)
+        self.assertIn("def last_lookup_company_frame", text)
+        self.assertIn("def close_company_lookup_dialogs", text)
+        self.assertIn("Using newest lookupCompany iframe", text)
+        self.assertIn("not clicking Search", text)
+        self.assertIn("Contact already", text)
+        self.assertIn("not stripping lookup dialogs", text)
+        self.assertIn("def wait_for_check_results", text)
+        self.assertIn("Recipient [", text)
+        self.assertNotIn('page.frame_locator("iframe[src*=\'lookupCompany\']")', text)
+        self.assertNotIn("Fallback: using first visible iframe.", text)
+        self.assertNotIn('wait_for_selector("table:has-text(\'Message\')"', text)
 
     def test_load_live_credentials_requires_secrets(self):
         saved = {k: os.environ.pop(k, None) for k in ("IMDS_USERNAME", "IMDS_PASSWORD", "OTP_SECRET", "IMDS_MASTER_KEY")}
@@ -152,6 +163,64 @@ class SummaryExportTests(unittest.TestCase):
             values = [c.value for c in next(ws.iter_rows(min_row=2, max_row=2))]
             self.assertEqual(values[-1], "Accepted, forwarded, proposed")
             self.assertNotIn("No", values)
+
+
+class CompanyLookupHelpers(unittest.TestCase):
+    def test_empty_search_criteria_prompt(self):
+        self.assertTrue(
+            imds_agent_v2.is_empty_search_criteria_prompt("Please enter at least one search criteria!")
+        )
+        self.assertTrue(
+            imds_agent_v2.is_empty_search_criteria_prompt(
+                "MDS - MATERIAL DATA SYSTEM\nInformation\nPlease enter at least one search criteria!"
+            )
+        )
+        self.assertFalse(imds_agent_v2.is_empty_search_criteria_prompt("Do you want to save your changes?"))
+        self.assertFalse(imds_agent_v2.is_empty_search_criteria_prompt("Clicked Search button inside iframe."))
+
+    def test_recipient_id_in_text(self):
+        tree = "Johnson Electric Industrial Manufactory Limited [9994] not yet browsed (08/26/2026)"
+        self.assertTrue(imds_agent_v2.recipient_id_in_text(tree, "9994"))
+        self.assertFalse(imds_agent_v2.recipient_id_in_text(tree, "293798"))
+        self.assertFalse(imds_agent_v2.recipient_id_in_text("", "9994"))
+        self.assertFalse(imds_agent_v2.recipient_id_in_text(tree, ""))
+
+    def test_contact_name_matches(self):
+        self.assertTrue(imds_agent_v2.contact_name_matches("Qu, Theresa", "Qu, Theresa"))
+        self.assertTrue(imds_agent_v2.contact_name_matches("Qu, Theresa", "Qu"))
+        self.assertFalse(imds_agent_v2.contact_name_matches("-", "Qu, Theresa"))
+        self.assertFalse(imds_agent_v2.contact_name_matches("", "Qu, Theresa"))
+
+    def test_company_id_was_filled(self):
+        self.assertTrue(imds_agent_v2.company_id_was_filled("9994", "9994"))
+        self.assertTrue(imds_agent_v2.company_id_was_filled("293798", "293798"))
+        self.assertFalse(imds_agent_v2.company_id_was_filled("", "9994"))
+        self.assertFalse(imds_agent_v2.company_id_was_filled(None, "293798"))
+        self.assertFalse(imds_agent_v2.company_id_was_filled("9994", "293798"))
+
+    def test_should_js_strip_modal_never_when_lookup_iframes(self):
+        self.assertFalse(
+            imds_agent_v2.should_js_strip_modal(lookup_iframes=2, dialog_text="", yes_no=False)
+        )
+        self.assertFalse(
+            imds_agent_v2.should_js_strip_modal(
+                lookup_iframes=1,
+                dialog_text="Please enter at least one search criteria!",
+                yes_no=False,
+            )
+        )
+        self.assertFalse(
+            imds_agent_v2.should_js_strip_modal(
+                lookup_iframes=0, dialog_text="Do you want to save your changes?", yes_no=True
+            )
+        )
+        self.assertTrue(imds_agent_v2.should_js_strip_modal(lookup_iframes=0, dialog_text="", yes_no=False))
+
+    def test_check_results_present_without_visible_message_table(self):
+        self.assertTrue(imds_agent_v2.check_results_present("Check results - 0 Error(s) / 0 Warning(s)"))
+        self.assertTrue(imds_agent_v2.check_results_present("The MDS has passed all included checks."))
+        self.assertFalse(imds_agent_v2.check_results_present("Clicked Check item."))
+        self.assertFalse(imds_agent_v2.check_results_present(""))
 
 
 if __name__ == "__main__":
