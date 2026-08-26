@@ -148,6 +148,16 @@ XP_ACCEPT_MODAL = "//*[@id='dcPopup:ctbAcceptMds']/a/span"
 XP_FORWARD_MENU = "//*[@id='pt1:pt_mMenuForward']"
 XP_FORWARD_ACTION1 = "//*[@id='pt1:pt_cmiMenuForward']/td[1]"
 XP_FORWARD_ACTION2 = "//*[@id='pt1:pt_cmiMenuForward']/td[2]"
+# Same IDs as above; ADF often puts the clickable text in td[1]/td[2] (Accept already uses /td[2]).
+XP_FORWARD_MENU_CLICK = [
+    "//*[@id='pt1:pt_mMenuForward']/td[2]",
+    "//*[@id='pt1:pt_mMenuForward']/td[1]",
+    "//*[@id='pt1:pt_mMenuForward']//a",
+    XP_FORWARD_MENU,
+    "//*[@id='pt1:pt_cmiMenuForward']/td[2]",
+    "//*[@id='pt1:pt_cmiMenuForward']/td[1]",
+    "//*[@id='pt1:pt_cmiMenuForward']",
+]
 XP_FORWARD_OK = "//*[@id='pt1:pt_dcud:ctbOk']/a"
 XP_SUPPLIER_DATA = "//*[@id='pt1:sdiDetailSupplier::disAcr']"
 XP_CONTACT = "//*[@id='pt1:dcSupp:socContact::content']"
@@ -1297,9 +1307,29 @@ def reject_mds(page):
     save_screenshot(page, "after_reject.png")
     return True
 
+def _click_xpath_if_present(page, xpath, *, hover_first: bool = False) -> bool:
+    """Click an ADF node if it exists. Do not require is_visible() — submenu wrappers often fail that check."""
+    try:
+        loc = page.locator(f"xpath={xpath}")
+        if loc.count() == 0:
+            return False
+        target = loc.first
+        if hover_first:
+            try:
+                target.hover(force=True, timeout=3000)
+                page.wait_for_timeout(400)
+            except Exception:
+                pass
+        target.click(force=True, timeout=5000)
+        return True
+    except Exception:
+        return False
+
+
 # ---------- Forward MDS ----------
 def forward_mds(page):
     log.info("Forwarding MDS using exact XPaths...")
+    dismiss_modal(page)
     try:
         mds_menu = page.locator(f"xpath={XP_MDS_MENU}")
         if mds_menu.count() > 0 and mds_menu.is_visible():
@@ -1321,34 +1351,51 @@ def forward_mds(page):
         log.warning(f"Failed to click MDS menu: {e}")
         return False
 
+    forward_clicked = False
     try:
         forward_main = page.locator(f"xpath={XP_FORWARD_MENU}")
         if forward_main.count() > 0 and forward_main.is_visible():
+            try:
+                forward_main.hover(force=True)
+                page.wait_for_timeout(400)
+            except Exception:
+                pass
             forward_main.click(force=True)
             log.info("Clicked Forward main menu item (exact XPath).")
             page.wait_for_timeout(1000)
+            forward_clicked = True
         else:
-            log.warning("Forward main menu item not found; trying fallback.")
-            forward_selectors = [
-                "xpath=//*[contains(@id,'cmiMenuForward')]",
-                "a:has-text('Forward'):visible",
-                "li:has-text('Forward'):visible",
-                "[role='menuitem']:has-text('Forward'):visible",
-            ]
-            forward_clicked = False
-            for selector in forward_selectors:
-                try:
-                    if selector.startswith("xpath="):
-                        loc = page.locator(selector[6:]).first
-                    else:
-                        loc = page.locator(selector).first
-                    if loc.count() > 0 and loc.is_visible():
-                        loc.click(force=True)
+            log.warning("Forward main menu wrapper not visible; trying same-id td/a cells.")
+            for xp in XP_FORWARD_MENU_CLICK:
+                if _click_xpath_if_present(page, xp, hover_first=True):
+                    log.info(f"Clicked Forward via XPath: {xp}")
+                    page.wait_for_timeout(800)
+                    forward_clicked = True
+                    break
+            if not forward_clicked:
+                forward_selectors = [
+                    "xpath=//*[contains(@id,'cmiMenuForward')]",
+                    "xpath=//*[contains(@id,'mMenuForward')]",
+                    "a:has-text('Forward')",
+                    "li:has-text('Forward')",
+                    "td:has-text('Forward')",
+                    "[role='menuitem']:has-text('Forward')",
+                ]
+                for selector in forward_selectors:
+                    try:
+                        if selector.startswith("xpath="):
+                            loc = page.locator(selector[6:])
+                        else:
+                            loc = page.locator(selector)
+                        if loc.count() == 0:
+                            continue
+                        loc.first.click(force=True, timeout=5000)
                         log.info(f"Clicked Forward via fallback selector: {selector}")
                         forward_clicked = True
+                        page.wait_for_timeout(800)
                         break
-                except Exception as e:
-                    log.warning(f"Fallback selector {selector} failed: {e}")
+                    except Exception as e:
+                        log.warning(f"Fallback selector {selector} failed: {e}")
             if not forward_clicked:
                 log.warning("Forward menu item not found.")
                 save_screenshot(page, "forward_menu_not_found.png")
@@ -1358,27 +1405,26 @@ def forward_mds(page):
         return False
 
     action_clicked = False
-    for xp in [XP_FORWARD_ACTION1, XP_FORWARD_ACTION2]:
-        try:
-            action = page.locator(f"xpath={xp}")
-            if action.count() > 0 and action.is_visible():
-                action.click(force=True)
-                log.info(f"Clicked Forward action via XPath: {xp}")
-                action_clicked = True
-                break
-        except Exception as e:
-            log.warning(f"Forward action XPath {xp} failed: {e}")
+    for xp in [XP_FORWARD_ACTION2, XP_FORWARD_ACTION1]:
+        if _click_xpath_if_present(page, xp):
+            log.info(f"Clicked Forward action via XPath: {xp}")
+            action_clicked = True
+            break
 
     if not action_clicked:
         log.warning("Forward action not found; trying fallback.")
         try:
-            action = page.locator("td:has-text('Forward'):visible").first
+            action = page.locator("td:has-text('Forward'), a:has-text('Forward')").first
             if action.count() > 0:
                 action.click(force=True)
                 log.info("Clicked Forward action by text fallback.")
                 action_clicked = True
         except Exception as e:
             log.warning(f"Text fallback failed: {e}")
+
+    if not action_clicked and forward_clicked:
+        log.info("Forward submenu click may have been the action; continuing.")
+        action_clicked = True
 
     if not action_clicked:
         log.warning("Forward action not found after all attempts.")
@@ -2039,12 +2085,13 @@ def accept_passed_mds(page, results):
 
         # Handle forward confirmation modal if present
         handle_forward_confirmation_modal(page)
+        page.wait_for_timeout(1500)
+        dismiss_modal(page)
 
         if not forward_mds(page):
-            log.warning("Forwarding failed.")
-            continue
-
-        log.info("Forward successful.")
+            log.warning("Forwarding failed; still attempting recipient/propose on the open MDS.")
+        else:
+            log.info("Forward successful.")
 
         if not complete_forward_recipients(page, supplier_code, part_no):
             log.warning("Recipient assignment incomplete.")

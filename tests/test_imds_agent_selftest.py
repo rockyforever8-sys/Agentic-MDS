@@ -20,6 +20,7 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertNotIn("jowk0001", text)
         self.assertIn("load_live_credentials", text)
         self.assertIn("XP_FORWARD_ACTION1", text)
+        self.assertIn("XP_FORWARD_MENU_CLICK", text)
         self.assertIn("XP_CONTACT_FALLBACKS", text)
         self.assertIn("def accept_passed_mds", text)
         self.assertIn("def reject_failed_mds", text)
