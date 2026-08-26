@@ -48,6 +48,12 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertIn("not stripping lookup dialogs", text)
         self.assertIn("def wait_for_check_results", text)
         self.assertIn("Recipient [", text)
+        self.assertIn("Contact display value:", text)
+        self.assertIn("Propose Failed (Contact must be specified)", text)
+        self.assertIn("Contact person selection Failed", text)
+        self.assertIn("close_check_results_dialog", text)
+        self.assertIn("not clicking Ingredients on a leftover or search page", text)
+        self.assertIn("not clicking the disabled Propose confirm", text)
         self.assertNotIn('page.frame_locator("iframe[src*=\'lookupCompany\']")', text)
         self.assertNotIn("Fallback: using first visible iframe.", text)
         self.assertNotIn('wait_for_selector("table:has-text(\'Message\')"', text)
@@ -190,6 +196,42 @@ class CompanyLookupHelpers(unittest.TestCase):
         self.assertTrue(imds_agent_v2.contact_name_matches("Qu, Theresa", "Qu"))
         self.assertFalse(imds_agent_v2.contact_name_matches("-", "Qu, Theresa"))
         self.assertFalse(imds_agent_v2.contact_name_matches("", "Qu, Theresa"))
+        self.assertFalse(imds_agent_v2.contact_name_matches("Please select", "Qu, Theresa"))
+        option_list = "Please select\nQu, Other\nQu, Theresa\nWong, Kam Yuen"
+        self.assertFalse(imds_agent_v2.contact_name_matches(option_list, "Qu, Theresa"))
+        self.assertEqual(imds_agent_v2.contact_display_value(option_list), "Please select")
+        self.assertTrue(imds_agent_v2.contact_is_blank("-"))
+        self.assertTrue(imds_agent_v2.contact_is_blank(""))
+        self.assertTrue(imds_agent_v2.contact_is_blank("Please select"))
+        self.assertFalse(imds_agent_v2.contact_is_blank("Qu, Theresa"))
+
+    def test_check_errors_blocking_prompt_and_no_js_strip(self):
+        check_text = (
+            "Check results - 1 Error(s) / 2 Warning(s)\n"
+            "Contact must be specified\n"
+            "All existing errors need to be eliminated before any further processing may take place."
+        )
+        self.assertTrue(imds_agent_v2.is_check_errors_blocking_prompt(check_text))
+        self.assertFalse(imds_agent_v2.is_check_errors_blocking_prompt("Do you want to save your changes?"))
+        self.assertEqual(
+            imds_agent_v2.propose_blocked_message(check_text),
+            "Propose Failed (Contact must be specified)",
+        )
+        self.assertEqual(
+            imds_agent_v2.propose_blocked_message(
+                "All existing errors need to be eliminated before any further processing may take place."
+            ),
+            "Propose Failed (Check errors)",
+        )
+        self.assertIsNone(imds_agent_v2.propose_blocked_message("Clicked Propose button."))
+        self.assertFalse(imds_agent_v2.should_js_strip_modal(lookup_iframes=0, dialog_text=check_text, yes_no=False))
+        self.assertFalse(
+            imds_agent_v2.should_js_strip_modal(
+                lookup_iframes=0,
+                dialog_text="Check results - 1 Error(s) / 2 Warning(s)",
+                yes_no=False,
+            )
+        )
 
     def test_company_id_was_filled(self):
         self.assertTrue(imds_agent_v2.company_id_was_filled("9994", "9994"))
