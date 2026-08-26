@@ -41,7 +41,7 @@ python -m unittest discover -s tests -v
 # python imds_agent_v2.py   # live run; needs IMDS_* env or Colab Secrets
 ```
 
-Live default: **10 MDS** (`NUM_ITERATIONS`). Same accept / forward / propose / reject actions as the original working script. Excel: `imds_output/check_summary.xlsx` (includes **Action Result** instead of IMDS list Status).
+Live default: **10 MDS** (`NUM_ITERATIONS`). A leftover Colab/vault value of `3` is treated as unset so an old debug cell cannot pin the run. Same accept / forward / propose / reject actions as the original working script. Excel: `imds_output/check_summary.xlsx` (includes **Action Result** instead of IMDS list Status).
 
 ## Rebuild
 

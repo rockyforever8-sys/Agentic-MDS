@@ -52,7 +52,29 @@ log = logging.getLogger(__name__)
 # Login secrets: Colab 🔑 (IMDS_USERNAME, IMDS_PASSWORD, OTP_SECRET) or the environment.
 # Never hardcode passwords in this file.
 OUTPUT_DIR = os.getenv("IMDS_OUTPUT_DIR", "./imds_output")
-NUM_ITERATIONS = int(os.getenv("NUM_ITERATIONS", "10"))
+DEFAULT_NUM_ITERATIONS = 10
+
+
+def resolve_num_iterations(raw: str | None = None) -> int:
+    """Live default is 10. A leftover Colab/vault value of 3 is treated as unset."""
+    if raw is None:
+        raw = os.getenv("NUM_ITERATIONS", "")
+    text = str(raw or "").strip()
+    if not text:
+        return DEFAULT_NUM_ITERATIONS
+    try:
+        n = int(text)
+    except ValueError:
+        return DEFAULT_NUM_ITERATIONS
+    if n < 1:
+        return DEFAULT_NUM_ITERATIONS
+    # Earlier debug cells and the Drive vault stored 3. Honor any other explicit count.
+    if n == 3 and os.getenv("IMDS_ALLOW_THREE") not in {"1", "true", "yes"}:
+        return DEFAULT_NUM_ITERATIONS
+    return n
+
+
+NUM_ITERATIONS = resolve_num_iterations()
 RECIPIENT_IDS = [x.strip() for x in os.getenv("RECIPIENT_COMPANY_IDS", "9994,293798").split(",") if x.strip()]
 IMDS_USERNAME = os.getenv("IMDS_USERNAME", "")
 IMDS_PASSWORD = os.getenv("IMDS_PASSWORD", "")
@@ -76,7 +98,8 @@ def load_live_credentials():
     IMDS_USERNAME = os.environ["IMDS_USERNAME"]
     IMDS_PASSWORD = os.environ["IMDS_PASSWORD"]
     OTP_SECRET = os.environ["OTP_SECRET"]
-    NUM_ITERATIONS = int(os.getenv("NUM_ITERATIONS", str(NUM_ITERATIONS)))
+    NUM_ITERATIONS = resolve_num_iterations()
+    log.info(f"Will process up to {NUM_ITERATIONS} MDS rows.")
     RECIPIENT_IDS = [
         x.strip()
         for x in os.getenv("RECIPIENT_COMPANY_IDS", ",".join(RECIPIENT_IDS)).split(",")
