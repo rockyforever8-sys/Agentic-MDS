@@ -29,7 +29,8 @@ Speaker notes are timed on every slide.
 - **Logic:** [`imds_decisions.py`](imds_decisions.py) (green / amber / red, no Playwright)
 - **Private secrets:** [`imds_secrets.py`](imds_secrets.py) (Colab 🔑 + encrypted vault, never committed)
 - **Playwright agent:** [`imds_agent_v2.py`](imds_agent_v2.py)
-- **Colab notebook:** [`Agentic_MDS.ipynb`](Agentic_MDS.ipynb) — one green **Run IMDS until complete** button
+- **Start in Colab (recommended):** [Open Colab_Start_Here.ipynb](https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/main/Colab_Start_Here.ipynb)
+- **Full notebook:** [`Agentic_MDS.ipynb`](Agentic_MDS.ipynb) — use **File → Upload notebook**. Do **not** paste the `.ipynb` JSON into a code cell (`NameError: true` means that happened).
 
 Put `IMDS_USERNAME`, `IMDS_PASSWORD`, `OTP_SECRET`, and `IMDS_MASTER_KEY` in Colab Secrets. They are private to your Google account. The notebook encrypts a vault to Drive `MyDrive/imds_private/credentials.enc` (gitignored).
 
