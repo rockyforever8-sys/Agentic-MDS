@@ -101,6 +101,35 @@ class ColabLoopTests(unittest.TestCase):
         )
         self.assertFalse(imds_agent_v2._looks_like_missing_chromium_lib(RuntimeError("timeout")))
 
+    def test_first_visible_skips_hidden_adf_clones(self):
+        class _Item:
+            def __init__(self, shown: bool) -> None:
+                self._shown = shown
+
+            def is_visible(self) -> bool:
+                return self._shown
+
+        class _Loc:
+            def __init__(self, flags: list[bool]) -> None:
+                self._flags = flags
+
+            def count(self) -> int:
+                return len(self._flags)
+
+            def nth(self, i: int) -> _Item:
+                return _Item(self._flags[i])
+
+        self.assertIsNone(imds_agent_v2.first_visible(_Loc([False, False])))
+        hit = imds_agent_v2.first_visible(_Loc([False, True, True]))
+        self.assertIsNotNone(hit)
+        self.assertTrue(hit.is_visible())
+
+    def test_username_selectors_include_adf_user_id(self):
+        joined = " ".join(imds_agent_v2.USERNAME_SELECTORS)
+        self.assertIn("::content", joined)
+        self.assertIn("UserId", joined)
+        self.assertIn("#username", joined)
+
 
 if __name__ == "__main__":
     unittest.main()

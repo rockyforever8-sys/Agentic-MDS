@@ -250,18 +250,33 @@ def wait_ui(page, extra_ms: int = 0, timeout: int = 15000) -> None:
         page.wait_for_timeout(extra_ms)
 
 
-def visible(locator) -> bool:
+def first_visible(locator, limit: int = 12):
+    """Return the first visible match. ADF often clones hidden nodes as locator.first."""
     try:
-        return locator.count() > 0 and locator.first.is_visible()
+        count = locator.count()
     except Exception:
-        return False
+        return None
+    for i in range(min(count, limit)):
+        item = locator.nth(i)
+        try:
+            if item.is_visible():
+                return item
+        except Exception:
+            continue
+    return None
+
+
+def visible(locator) -> bool:
+    return first_visible(locator) is not None
 
 
 def click_ready(locator, *, force: bool = False, timeout: int = 10000) -> bool:
     """Click when visible. force=True only for ADF menus that sit under a glass pane."""
     try:
-        target = locator.first
-        target.wait_for(state="visible", timeout=timeout)
+        target = first_visible(locator)
+        if target is None:
+            locator.first.wait_for(state="visible", timeout=timeout)
+            target = first_visible(locator) or locator.first
         target.click(force=force, timeout=timeout)
         return True
     except Exception as exc:
@@ -333,61 +348,193 @@ def append_audit(cfg: Config, record: dict) -> None:
 
 
 # ---------- Login / navigation ----------
+LOGIN_PAGE_URL = "https://www.mdsystem.com/imdsnt/faces/login?language=en"
+USERNAME_SELECTORS = (
+    "input[id*='UserId' i][id$='::content']",
+    "input[id*='userid' i][id$='::content']",
+    "input[id*='User' i][id$='::content']",
+    "input[id*='itUser' i]",
+    "#username",
+    "input[name='username']",
+    "input[name='userid']",
+    "input[name='j_username']",
+    "input[title*='User' i]",
+    "input[placeholder*='User' i]",
+    "input[aria-label*='User' i]",
+)
+
+
+def _username_locator(root):
+    return root.locator(", ".join(USERNAME_SELECTORS))
+
+
+def _dump_login_debug(page, cfg: Config, name: str) -> None:
+    save_screenshot(page, cfg, name, important=True)
+    try:
+        html_path = cfg.output_dir / "login_page.html"
+        html_path.write_text(page.content(), encoding="utf-8")
+        log.info("Wrote %s", html_path)
+    except Exception as exc:
+        log.warning("Could not write login HTML: %s", exc)
+    try:
+        bits = []
+        for el in page.locator("input, a, button").all()[:40]:
+            bits.append(
+                {
+                    "tag": el.evaluate("e => e.tagName"),
+                    "id": el.get_attribute("id"),
+                    "name": el.get_attribute("name"),
+                    "type": el.get_attribute("type"),
+                    "text": (el.inner_text() or "")[:80],
+                    "visible": el.is_visible(),
+                }
+            )
+        log.info("Login DOM sample: %s", bits)
+    except Exception as exc:
+        log.warning("Could not list login DOM: %s", exc)
+
+
+def _click_landing_login(page) -> bool:
+    """Public IMDS page has a Login link with a key icon; fields are not on that page."""
+    candidates = [
+        page.locator("a:has(img):has-text('Login')"),
+        page.locator("xpath=//a[.//img and contains(normalize-space(.), 'Login')]"),
+        page.get_by_role("link", name=re.compile(r"^Login$")),
+        page.locator("a").filter(has_text=re.compile(r"^Login$")),
+        page.locator(
+            "xpath=//img[contains(translate(@src,'KEY','key'),'key') or "
+            "contains(translate(@alt,'LOGIN','login'),'login')]/ancestor::a[1]"
+        ),
+        page.locator(
+            "xpath=//*[contains(., 'User ID forgotten')]/ancestor::table[1]"
+            "//a[contains(normalize-space(.), 'Login')]"
+        ),
+        page.get_by_text("Login", exact=True),
+    ]
+    for loc in candidates:
+        target = first_visible(loc)
+        if target is None:
+            continue
+        try:
+            target.click(timeout=8000)
+            log.info("Clicked the IMDS Login control.")
+            log.info("URL after Login click: %s", page.url)
+            return True
+        except Exception as exc:
+            log.warning("Login click failed (%s); trying force.", exc)
+            try:
+                target.click(force=True, timeout=8000)
+                log.info("Clicked the IMDS Login control (force).")
+                log.info("URL after Login click: %s", page.url)
+                return True
+            except Exception as exc2:
+                log.warning("Force Login click failed: %s", exc2)
+    return False
+
+
+def _visible_username(page):
+    for root in [page, *list(page.frames)]:
+        try:
+            hit = first_visible(_username_locator(root))
+        except Exception:
+            continue
+        if hit is not None:
+            return hit
+        try:
+            text_inputs = first_visible(root.locator("input[type='text']:not([type='hidden'])"))
+        except Exception:
+            text_inputs = None
+        if text_inputs is not None:
+            return text_inputs
+    return None
+
+
+def _submit_imds_credentials(page) -> None:
+    for selector in (
+        "a:has-text('Continue')",
+        "button:has-text('Continue')",
+        "input[value='Continue']",
+        "button:has-text('Sign in')",
+        "input[value*='Sign in']",
+        "a:has-text('Sign in')",
+    ):
+        if click_ready(page.locator(selector)):
+            log.info("Submitted credentials via %s", selector)
+            return
+    page.keyboard.press("Enter")
+    log.info("Submitted credentials with Enter.")
+
+
 def imds_login(page, cfg: Config) -> None:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
     log.info("Logging in...")
-    page.goto("https://www.mdsystem.com/imdsnt", wait_until="domcontentloaded", timeout=60000)
-    wait_ui(page, extra_ms=300)
-
-    login_link = page.locator("a:has-text('Login')").first
-    if visible(login_link):
-        click_ready(login_link)
-        wait_ui(page, extra_ms=300)
-
-    username = page.locator("#username, input[name='username']").first
+    page.goto(LOGIN_PAGE_URL, wait_until="domcontentloaded", timeout=60000)
     try:
-        username.wait_for(state="visible", timeout=30000)
+        page.get_by_text("User ID forgotten").first.wait_for(state="visible", timeout=45000)
     except PlaywrightTimeoutError:
-        sso_btn = page.locator("button:has-text('Sign in'), a:has-text('Sign in')").first
-        if not visible(sso_btn) or not click_ready(sso_btn):
-            save_screenshot(page, cfg, "login_username_not_found.png", important=True)
-            raise RuntimeError("Cannot find username field or sign-in button.")
-        username = page.locator("#username, input[name='username']").first
-        username.wait_for(state="visible", timeout=15000)
+        log.warning("Did not see 'User ID forgotten' landmark; continuing.")
+    wait_ui(page, extra_ms=500)
+
+    if _visible_username(page) is None:
+        if not _click_landing_login(page):
+            log.warning("Login link was not clicked; username fields may still appear.")
+        wait_ui(page, extra_ms=1000)
+
+    username = None
+    for _ in range(25):
+        username = _visible_username(page)
+        if username is not None:
+            break
+        page.wait_for_timeout(1000)
+    if username is None:
+        _dump_login_debug(page, cfg, "login_username_not_found.png")
+        raise RuntimeError(
+            "Cannot find username field. On the IMDS home page, click Login "
+            "(key icon) first — the User ID box is not on the public landing page."
+        )
 
     username.fill(cfg.username)
-    next_btn = page.locator("button:has-text('Sign in'), button:has-text('Next')").first
-    if visible(next_btn):
-        click_ready(next_btn)
-    else:
-        username.press("Enter")
-    wait_ui(page, extra_ms=300)
+    log.info("Filled User ID (value not logged).")
 
-    password = page.locator("input[type='password']").first
-    try:
-        password.wait_for(state="visible", timeout=15000)
-    except PlaywrightTimeoutError:
-        save_screenshot(page, cfg, "login_password_not_found.png", important=True)
-        raise RuntimeError("Password field not found after username submission.")
+    password = None
+    for root in [page, *list(page.frames)]:
+        hit = first_visible(root.locator("input[type='password']"))
+        if hit is not None:
+            password = hit
+            break
+    if password is None:
+        next_btn = page.locator("button:has-text('Sign in'), button:has-text('Next'), a:has-text('Next')")
+        if visible(next_btn):
+            click_ready(next_btn)
+            wait_ui(page, extra_ms=400)
+        else:
+            username.press("Enter")
+            wait_ui(page, extra_ms=400)
+        try:
+            page.locator("input[type='password']").first.wait_for(state="visible", timeout=15000)
+        except PlaywrightTimeoutError:
+            _dump_login_debug(page, cfg, "login_password_not_found.png")
+            raise RuntimeError("Password field not found after username submission.")
+        password = first_visible(page.locator("input[type='password']"))
+        if password is None:
+            _dump_login_debug(page, cfg, "login_password_not_found.png")
+            raise RuntimeError("Password field not found after username submission.")
+
     password.fill(cfg.password)
-    login_btn = page.locator(
-        "button:has-text('Sign in'), button:has-text('Login'), input[value*='Sign in'], input[value*='Login']"
-    ).first
-    if visible(login_btn):
-        click_ready(login_btn)
-    else:
-        password.press("Enter")
-    wait_ui(page, extra_ms=400)
+    log.info("Filled password (value not logged).")
+    _submit_imds_credentials(page)
+    wait_ui(page, extra_ms=600)
 
     try:
         otp_field = page.locator(
-            "input[type='text'][placeholder*='code' i], input[type='text'][placeholder*='OTP' i], input[name='otp'], input#otp"
+            "input[type='text'][placeholder*='code' i], input[type='text'][placeholder*='OTP' i], "
+            "input[name='otp'], input#otp, input[id*='otp' i][id$='::content']"
         ).first
         otp_field.wait_for(state="visible", timeout=15000)
         otp_field.fill(get_otp(cfg.otp_secret))
         log.info("Filled OTP (value not logged).")
-        submit_otp = page.locator("button:has-text('Verify'), button:has-text('Submit')").first
+        submit_otp = page.locator("button:has-text('Verify'), button:has-text('Submit'), a:has-text('Continue')")
         if visible(submit_otp):
             click_ready(submit_otp)
         else:
@@ -396,8 +543,8 @@ def imds_login(page, cfg: Config) -> None:
     except PlaywrightTimeoutError:
         log.info("No OTP field appeared.")
 
-    if visible(page.locator("button:has-text('Login')").first):
-        save_screenshot(page, cfg, "login_failed.png", important=True)
+    if visible(page.get_by_text("User ID forgotten")) and _visible_username(page) is not None:
+        _dump_login_debug(page, cfg, "login_failed.png")
         raise RuntimeError("Login failed.")
     log.info("Login successful.")
     save_screenshot(page, cfg, "01_after_login.png", important=True)
