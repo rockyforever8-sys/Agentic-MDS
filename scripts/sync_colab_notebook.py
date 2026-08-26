@@ -57,7 +57,7 @@ This notebook runs the **original IMDS agent** (`imds_agent_v2.py`) — same XPa
 | `OTP_SECRET` | Authenticator TOTP seed (not a Gmail app password) |
 | `IMDS_MASTER_KEY` | Optional passphrase for the encrypted Drive vault |
 
-Optional: `NUM_ITERATIONS` (default **3**), `RECIPIENT_COMPANY_IDS` (default `9994,293798`).
+Optional: `NUM_ITERATIONS` (default **10**), `RECIPIENT_COMPANY_IDS` (default `9994,293798`).
 
 Then click **Run IMDS until complete**. Output: `imds_output/check_summary.xlsx`.""",
             "md-intro",
@@ -132,7 +132,7 @@ try:
 except ImportError:
     pass
 
-os.environ.setdefault("NUM_ITERATIONS", "3")
+os.environ.setdefault("NUM_ITERATIONS", "10")
 os.environ.setdefault("RECIPIENT_COMPANY_IDS", "9994,293798")
 
 from imds_secrets import apply_stored_credentials, missing_secret_keys

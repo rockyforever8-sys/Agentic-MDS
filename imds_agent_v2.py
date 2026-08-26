@@ -52,7 +52,7 @@ log = logging.getLogger(__name__)
 # Login secrets: Colab 🔑 (IMDS_USERNAME, IMDS_PASSWORD, OTP_SECRET) or the environment.
 # Never hardcode passwords in this file.
 OUTPUT_DIR = os.getenv("IMDS_OUTPUT_DIR", "./imds_output")
-NUM_ITERATIONS = int(os.getenv("NUM_ITERATIONS", "3"))
+NUM_ITERATIONS = int(os.getenv("NUM_ITERATIONS", "10"))
 RECIPIENT_IDS = [x.strip() for x in os.getenv("RECIPIENT_COMPANY_IDS", "9994,293798").split(",") if x.strip()]
 IMDS_USERNAME = os.getenv("IMDS_USERNAME", "")
 IMDS_PASSWORD = os.getenv("IMDS_PASSWORD", "")
@@ -249,6 +249,37 @@ def mds_open_status(visible: str | None, expected: str | None) -> str:
 def mds_id_matches(visible: str | None, expected: str | None) -> bool:
     """True when the numeric MDS ID matches. Version (2 vs 0.02 vs 1.01) is ignored."""
     return mds_open_status(visible, expected) == "match"
+
+
+SUMMARY_COLUMNS = [
+    "MDS ID / Version",
+    "Check Result",
+    "Parts Marking Check",
+    "Recyclate Check",
+    "Biocidal Check",
+    "Overall Result",
+    "Supplier Code",
+    "Part/Item No.",
+    "Action Result",
+]
+
+
+def save_check_summary(results, dest: Path | None = None) -> Path | None:
+    """Write the Excel summary Colab displays. Status is omitted; Action Result is the break-out reason."""
+    if not results:
+        log.warning("No results to export.")
+        return None
+    dest = dest or Path(OUTPUT_DIR) / "check_summary.xlsx"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Check Summary"
+    ws.append(list(SUMMARY_COLUMNS))
+    for row in results:
+        ws.append([row.get(col, "") for col in SUMMARY_COLUMNS])
+    wb.save(str(dest))
+    log.info(f"Excel summary saved to {dest}")
+    return dest
 
 def get_otp():
     return pyotp.TOTP(OTP_SECRET.replace(" ", "").upper()).now()
@@ -1792,8 +1823,10 @@ def complete_forward_recipients(page, supplier_code, part_no):
     except Exception as e:
         log.warning(f"Error clicking Supplier Data: {e}")
 
+    contact_ok = True
     if not select_contact_person(page, "Qu, Theresa"):
         log.warning("Contact person selection failed.")
+        contact_ok = False
 
     try:
         recipient_data = page.locator(f"xpath={XP_RECIPIENT_DATA}")
@@ -1818,10 +1851,10 @@ def complete_forward_recipients(page, supplier_code, part_no):
                 log.info("Clicked Add Recipient.")
             else:
                 log.warning("Add Recipient button not found.")
-                return False
+                return "Add Recipient Failed"
         except Exception as e:
             log.warning(f"Error clicking Add Recipient: {e}")
-            return False
+            return "Add Recipient Failed"
 
         # 2. Wait for modal glass pane
         try:
@@ -1851,16 +1884,10 @@ def complete_forward_recipients(page, supplier_code, part_no):
             if 'frame_locator' not in locals():
                 log.warning("No iframe found; cannot proceed.")
                 save_screenshot(page, "no_iframe.png")
-                return False
+                return "Recipient lookup Failed"
 
-        # Wait for any input to appear in the iframe
-        try:
-            frame_locator.locator("input").first.wait_for(state="visible", timeout=10000)
-            log.info("Input(s) are now visible in the iframe.")
-        except Exception as e:
-            log.warning(f"Timeout waiting for input in iframe: {e}")
-
-        # 4. Locate the Company ID field – first try exact XPaths with wait
+        # 4. Locate the Company ID field (do not wait on input.first — ADF's first
+        # input is a hidden RICH_UPDATE token and burns 10s every lookup).
         company_field = None
 
         # Try exact XPaths with explicit wait
@@ -1868,7 +1895,7 @@ def complete_forward_recipients(page, supplier_code, part_no):
             try:
                 field = frame_locator.locator(f"xpath={xp}")
                 # Wait for it to be visible
-                field.wait_for(state="visible", timeout=5000)
+                field.wait_for(state="visible", timeout=3000)
                 if field.count() > 0 and field.is_visible():
                     company_field = field
                     log.info(f"Found Company ID field via exact XPath: {xp}")
@@ -1964,7 +1991,7 @@ def complete_forward_recipients(page, supplier_code, part_no):
         if company_field is None or company_field.count() == 0:
             log.warning("Company ID field not found after all strategies.")
             save_screenshot(page, "company_id_not_found.png")
-            return False
+            return "Recipient lookup Failed"
 
         # 5. Fill the Company ID
         try:
@@ -1978,7 +2005,7 @@ def complete_forward_recipients(page, supplier_code, part_no):
                 log.warning(f"Value mismatch: filled {company_id}, but input has {filled_value}")
         except Exception as e:
             log.warning(f"Error filling Company ID: {e}")
-            return False
+            return "Recipient lookup Failed"
 
         # 6. Click Search button inside iframe
         try:
@@ -1993,10 +2020,10 @@ def complete_forward_recipients(page, supplier_code, part_no):
                 page.wait_for_timeout(2000)
             else:
                 log.warning("Search button not found.")
-                return False
+                return "Recipient lookup Failed"
         except Exception as e:
             log.warning(f"Error clicking Search: {e}")
-            return False
+            return "Recipient lookup Failed"
 
         # 7. Click Apply button inside iframe
         try:
@@ -2007,8 +2034,7 @@ def complete_forward_recipients(page, supplier_code, part_no):
                 apply_btn.click(force=True)
                 log.info("Clicked Apply button inside iframe.")
                 page.wait_for_load_state("networkidle", timeout=15000)
-                page.wait_for_timeout(2000)
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(1500)
                 save_screenshot(page, f"after_click_apply_{company_id}.png")
             else:
                 log.warning("Apply button not found; trying JavaScript...")
@@ -2019,8 +2045,7 @@ def complete_forward_recipients(page, supplier_code, part_no):
                         if (btn) btn.click();
                     }
                 """)
-                page.wait_for_timeout(2000)
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(1500)
                 save_screenshot(page, f"after_click_apply_{company_id}_js.png")
         except Exception as e:
             log.warning(f"Error clicking Apply: {e}")
@@ -2034,10 +2059,10 @@ def complete_forward_recipients(page, supplier_code, part_no):
                 """)
                 page.wait_for_timeout(2000)
                 log.info("Applied via JavaScript fallback.")
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(1500)
             except Exception as e2:
                 log.warning(f"JavaScript fallback also failed: {e2}")
-                return False
+                return "Recipient lookup Failed"
 
         # 8. Wait for iframe to close
         try:
@@ -2102,10 +2127,10 @@ def complete_forward_recipients(page, supplier_code, part_no):
                 page.wait_for_timeout(2000)
             else:
                 log.warning("Propose button not found.")
-                return False
+                return "Propose Failed"
         except Exception as e:
             log.warning(f"Error clicking Propose: {e}")
-            return False
+            return "Propose Failed"
 
         # 11. Handle confirmation modal – using exact XPath for the Propose button inside the modal
         try:
@@ -2163,20 +2188,34 @@ def complete_forward_recipients(page, supplier_code, part_no):
             dismiss_modal(page)
 
         save_screenshot(page, f"after_recipient_{company_id}.png")
-        return True
+        return None
 
-    # Add recipients for each company ID
+    proposed = []
+    failures = []
     for cid in RECIPIENT_IDS:
         cid = cid.strip()
-        if cid:
-            if not add_recipient(cid):
-                log.warning(f"Failed to add recipient {cid}.")
-            else:
-                log.info(f"Successfully added recipient {cid}.")
+        if not cid:
+            continue
+        err = add_recipient(cid)
+        if err:
+            log.warning(f"Failed to add recipient {cid}: {err}")
+            failures.append(f"{err} ({cid})")
+        else:
+            log.info(f"Successfully added recipient {cid}.")
+            proposed.append(cid)
 
     save_screenshot(page, "after_recipients.png")
     log.info("Recipient assignment completed.")
-    return True
+    if not proposed:
+        if not contact_ok:
+            return False, "Contact person selection Failed"
+        return False, failures[0] if failures else "Recipient assignment Failed"
+    if failures:
+        extra = f"; proposed {', '.join(proposed)}" if proposed else ""
+        return False, "; ".join(failures) + extra
+    if not contact_ok:
+        return True, "Accepted, forwarded, proposed (contact selection failed)"
+    return True, "Accepted, forwarded, proposed"
 
 # ---------- Set Search Filters ----------
 def set_search_filters(page):
@@ -2467,14 +2506,20 @@ def accept_passed_mds(page, results):
 
         if not search_mds_by_id(page, mds_id_num):
             log.warning(f"Could not search for MDS {mds_id_num}. Skipping this MDS.")
+            res["Action Result"] = "Search Failed"
+            save_check_summary(results)
             continue
 
         if not open_first_result_on_content_page(page, mds_id_num):
             log.warning(f"Could not open Ingredients page for {mds_id_num}; Accept/Forward would be inactive.")
+            res["Action Result"] = "Open Failed"
+            save_check_summary(results)
             continue
 
         if not accept_mds(page):
             log.warning("Acceptance failed; skipping forwarding.")
+            res["Action Result"] = "Accept Failed"
+            save_check_summary(results)
             continue
 
         handle_forward_confirmation_modal(page)
@@ -2482,6 +2527,7 @@ def accept_passed_mds(page, results):
         wait_for_glass_pane_clear(page, timeout_ms=5000)
         current_id = read_visible_mds_id(page) or extract_mds_id_version_early(page)
         auto_forwarded = mds_open_status(current_id, mds_id_num) == "mismatch"
+        forward_note = ""
         if auto_forwarded:
             new_id = parse_mds_id_number(current_id) or current_id
             log.warning(
@@ -2489,6 +2535,7 @@ def accept_passed_mds(page, results):
                 f"(searched {mds_id_num}). Skipping a second Forward and proposing on {new_id}."
             )
             click_ingredients_tab(page)
+            forward_note = "Auto-forwarded"
         else:
             if not wait_for_mds_content_page(page, expected_id=mds_id_num):
                 log.warning("Left Ingredients page after Accept; clicking Ingredients before Forward.")
@@ -2496,13 +2543,24 @@ def accept_passed_mds(page, results):
                 wait_for_mds_content_page(page, expected_id=mds_id_num)
             if not forward_mds(page):
                 log.warning("Forwarding failed; still attempting recipient/propose on the open MDS.")
+                forward_note = "Forward Failed"
             else:
                 log.info("Forward successful.")
 
-        if not complete_forward_recipients(page, supplier_code, part_no):
-            log.warning("Recipient assignment incomplete.")
-        else:
+        ok, recipient_msg = complete_forward_recipients(page, supplier_code, part_no)
+        if ok:
+            if forward_note == "Forward Failed":
+                res["Action Result"] = f"Forward Failed; {recipient_msg}"
+            elif forward_note == "Auto-forwarded":
+                res["Action Result"] = "Auto-forwarded, proposed"
+            else:
+                res["Action Result"] = recipient_msg
             log.info("Recipient assignment successful.")
+        else:
+            prefix = f"{forward_note}; " if forward_note == "Forward Failed" else ""
+            res["Action Result"] = prefix + recipient_msg
+            log.warning("Recipient assignment incomplete.")
+        save_check_summary(results)
 
         if not navigate_to_search_page(page):
             log.warning("Could not return to Received MDSs search after propose; leftover MDS may remain open.")
@@ -2524,16 +2582,23 @@ def reject_failed_mds(page, results):
 
         if not search_mds_by_id(page, mds_id_num):
             log.warning(f"Could not search for MDS {mds_id_num}. Skipping this MDS.")
+            res["Action Result"] = "Search Failed"
+            save_check_summary(results)
             continue
 
         if not open_first_result_on_content_page(page, mds_id_num):
             log.warning(f"Could not open Ingredients page for {mds_id_num}; Reject would be inactive.")
+            res["Action Result"] = "Open Failed"
+            save_check_summary(results)
             continue
 
         if not reject_mds(page):
             log.warning(f"Rejection failed for MDS {mds_id_num}.")
+            res["Action Result"] = "Reject Failed"
         else:
             log.info(f"Successfully rejected MDS {mds_id_num}.")
+            res["Action Result"] = "Rejected"
+        save_check_summary(results)
 
         if not navigate_to_search_page(page):
             log.warning("Could not return to Received MDSs search after reject.")
@@ -2634,9 +2699,9 @@ def process_rows_and_export(page):
             "Overall Result": overall,
             "Supplier Code": supplier_code,
             "Part/Item No.": part_no,
-            "Status": status
+            "Action Result": "Pending action",
         })
-        log.info(f"Row {i+1}: {mds_id} -> Check: {result_msg} | Parts: {rule_results['parts_marking_check']} | Recyclate: {rule_results['recyclate_check']} | Biocidal: {rule_results['biocidal_check']} | Overall: {overall} | Supplier: {supplier_code} | Part: {part_no} | Status: {status}")
+        log.info(f"Row {i+1}: {mds_id} -> Check: {result_msg} | Parts: {rule_results['parts_marking_check']} | Recyclate: {rule_results['recyclate_check']} | Biocidal: {rule_results['biocidal_check']} | Overall: {overall} | Supplier: {supplier_code} | Part: {part_no}")
 
         if i < NUM_ITERATIONS - 1:
             log.info("Going back to results page...")
@@ -2652,34 +2717,15 @@ def process_rows_and_export(page):
             dismiss_modal(page)
             page.wait_for_timeout(2000)
 
-    if results:
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Check Summary"
-        ws.append(["MDS ID / Version", "Check Result", "Parts Marking Check", "Recyclate Check", "Biocidal Check", "Overall Result", "Supplier Code", "Part/Item No.", "Status"])
-        for row in results:
-            ws.append([
-                row["MDS ID / Version"],
-                row["Check Result"],
-                row["Parts Marking Check"],
-                row["Recyclate Check"],
-                row["Biocidal Check"],
-                row["Overall Result"],
-                row["Supplier Code"],
-                row["Part/Item No."],
-                row["Status"]
-            ])
-        excel_path = Path(OUTPUT_DIR) / "check_summary.xlsx"
-        wb.save(str(excel_path))
-        log.info(f"Excel summary saved to {excel_path}")
-    else:
-        log.warning("No results to export.")
+    save_check_summary(results)
 
     # Process PASS MDSs
     accept_passed_mds(page, results)
 
     # Process FAIL MDSs
     reject_failed_mds(page, results)
+
+    save_check_summary(results)
 
 # ---------- Orchestration ----------
 def orchestrate():

@@ -30,6 +30,9 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertIn("Clicked No on previous-version forward prompt", text)
         self.assertIn("not clicking Ingredients on the leftover sheet", text)
         self.assertNotIn("Looking for Yes button.", text)
+        self.assertNotIn('locator("input").first.wait_for(state="visible"', text)
+        self.assertIn("Action Result", text)
+        self.assertIn('os.getenv("NUM_ITERATIONS", "10")', text)
 
     def test_load_live_credentials_requires_secrets(self):
         saved = {k: os.environ.pop(k, None) for k in ("IMDS_USERNAME", "IMDS_PASSWORD", "OTP_SECRET", "IMDS_MASTER_KEY")}
@@ -70,6 +73,39 @@ class ForwardPromptHelpers(unittest.TestCase):
         self.assertEqual(imds_agent_v2.mds_open_status("1522070544 / 2", "1522070544"), "match")
         self.assertEqual(imds_agent_v2.mds_open_status("1522107776 / 1.01", "1522070544"), "mismatch")
         self.assertEqual(imds_agent_v2.parse_mds_id_number("1522107776 / 1.01"), "1522107776")
+
+
+class SummaryExportTests(unittest.TestCase):
+    def test_summary_columns_drop_status_and_add_action_result(self):
+        self.assertIn("Action Result", imds_agent_v2.SUMMARY_COLUMNS)
+        self.assertNotIn("Status", imds_agent_v2.SUMMARY_COLUMNS)
+
+    def test_save_check_summary_writes_action_result(self):
+        import tempfile
+        from openpyxl import load_workbook
+
+        rows = [{
+            "MDS ID / Version": "1522247238 / 1",
+            "Check Result": "Check results - 0 Error(s) / 0 Warning(s)",
+            "Parts Marking Check": "PASS",
+            "Recyclate Check": "PASS",
+            "Biocidal Check": "PASS",
+            "Overall Result": "PASS",
+            "Supplier Code": "606165",
+            "Part/Item No.": "1428-1130007",
+            "Action Result": "Accepted, forwarded, proposed",
+        }]
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "check_summary.xlsx"
+            written = imds_agent_v2.save_check_summary(rows, dest)
+            self.assertEqual(written, dest)
+            wb = load_workbook(dest)
+            ws = wb.active
+            headers = [c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
+            self.assertEqual(headers, list(imds_agent_v2.SUMMARY_COLUMNS))
+            values = [c.value for c in next(ws.iter_rows(min_row=2, max_row=2))]
+            self.assertEqual(values[-1], "Accepted, forwarded, proposed")
+            self.assertNotIn("No", values)
 
 
 if __name__ == "__main__":
