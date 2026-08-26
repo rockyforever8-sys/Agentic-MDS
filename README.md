@@ -28,7 +28,7 @@ Speaker notes are timed on every slide.
 
 - **Playwright agent (original XPaths):** [`imds_agent_v2.py`](imds_agent_v2.py)
 - **Private secrets:** [`imds_secrets.py`](imds_secrets.py) (Colab 🔑 + encrypted vault, never committed)
-- **Start in Colab:** [Open Colab_Start_Here.ipynb](https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/cursor/original-agent-colab-secrets-07ca/Colab_Start_Here.ipynb)
+- **Start in Colab:** [Open Colab_Start_Here.ipynb](https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/main/Colab_Start_Here.ipynb)
 
 Put `IMDS_USERNAME`, `IMDS_PASSWORD`, `OTP_SECRET`, and optional `IMDS_MASTER_KEY` in Colab Secrets. They stay in your Google account. The notebook can encrypt a vault to Drive `MyDrive/imds_private/credentials.enc` (gitignored).
 

@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-REF = "cursor/original-agent-colab-secrets-07ca"
+REF = "main"
 
 
 def as_source_lines(text: str) -> list[str]:
@@ -45,7 +45,7 @@ def cells() -> list[dict]:
 **Do not paste this `.ipynb` file into a code cell.** It is JSON. That causes `NameError: name 'true' is not defined`.
 
 Open it as a notebook:
-- [Open Colab_Start_Here.ipynb in Google Colab](https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/cursor/original-agent-colab-secrets-07ca/Colab_Start_Here.ipynb)
+- [Open Colab_Start_Here.ipynb in Google Colab](https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/main/Colab_Start_Here.ipynb)
 - Or Colab **File → Upload notebook**
 
 This notebook runs the **original IMDS agent** (`imds_agent_v2.py`) — same XPaths and actions that already produced your Excel output. The only change is **secret authentication**: passwords stay in Colab 🔑, not in the script.
