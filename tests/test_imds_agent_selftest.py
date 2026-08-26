@@ -32,7 +32,8 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertNotIn("Looking for Yes button.", text)
         self.assertNotIn('locator("input").first.wait_for(state="visible"', text)
         self.assertIn("Action Result", text)
-        self.assertIn('os.getenv("NUM_ITERATIONS", "10")', text)
+        self.assertIn("DEFAULT_NUM_ITERATIONS = 10", text)
+        self.assertIn("def resolve_num_iterations", text)
 
     def test_load_live_credentials_requires_secrets(self):
         saved = {k: os.environ.pop(k, None) for k in ("IMDS_USERNAME", "IMDS_PASSWORD", "OTP_SECRET", "IMDS_MASTER_KEY")}
@@ -48,6 +49,32 @@ class OriginalAgentTests(unittest.TestCase):
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
+
+
+class NumIterationsTests(unittest.TestCase):
+    def test_empty_and_invalid_default_to_ten(self):
+        self.assertEqual(imds_agent_v2.resolve_num_iterations(""), 10)
+        self.assertEqual(imds_agent_v2.resolve_num_iterations("  "), 10)
+        self.assertEqual(imds_agent_v2.resolve_num_iterations("abc"), 10)
+        self.assertEqual(imds_agent_v2.resolve_num_iterations("0"), 10)
+        self.assertEqual(imds_agent_v2.resolve_num_iterations("-1"), 10)
+
+    def test_leftover_three_becomes_ten(self):
+        saved = os.environ.pop("IMDS_ALLOW_THREE", None)
+        try:
+            self.assertEqual(imds_agent_v2.resolve_num_iterations("3"), 10)
+            os.environ["IMDS_ALLOW_THREE"] = "1"
+            self.assertEqual(imds_agent_v2.resolve_num_iterations("3"), 3)
+        finally:
+            if saved is None:
+                os.environ.pop("IMDS_ALLOW_THREE", None)
+            else:
+                os.environ["IMDS_ALLOW_THREE"] = saved
+
+    def test_explicit_counts_are_honored(self):
+        self.assertEqual(imds_agent_v2.resolve_num_iterations("10"), 10)
+        self.assertEqual(imds_agent_v2.resolve_num_iterations("20"), 20)
+        self.assertEqual(imds_agent_v2.resolve_num_iterations("5"), 5)
 
 
 class ForwardPromptHelpers(unittest.TestCase):

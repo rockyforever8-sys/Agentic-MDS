@@ -57,7 +57,7 @@ This notebook runs the **original IMDS agent** (`imds_agent_v2.py`) — same XPa
 | `OTP_SECRET` | Authenticator TOTP seed (not a Gmail app password) |
 | `IMDS_MASTER_KEY` | Optional passphrase for the encrypted Drive vault |
 
-Optional: `NUM_ITERATIONS` (default **10**), `RECIPIENT_COMPANY_IDS` (default `9994,293798`).
+Optional: `NUM_ITERATIONS` (default **10**; a leftover `3` from earlier debug cells is ignored), `RECIPIENT_COMPANY_IDS` (default `9994,293798`).
 
 Then click **Run IMDS until complete**. Output: `imds_output/check_summary.xlsx`.""",
             "md-intro",
@@ -120,8 +120,12 @@ try:
     ):
         try:
             val = userdata.get(_key)
-            if val:
-                os.environ[_key] = val
+            if not val:
+                continue
+            # Leftover debug Secret/env of 3 must not pin the live run.
+            if _key == "NUM_ITERATIONS" and val.strip() == "3":
+                continue
+            os.environ[_key] = val
         except Exception:
             pass
     if not Path("/content/drive/MyDrive").exists():
@@ -132,11 +136,12 @@ try:
 except ImportError:
     pass
 
-os.environ.setdefault("NUM_ITERATIONS", "10")
 os.environ.setdefault("RECIPIENT_COMPANY_IDS", "9994,293798")
 
+from imds_agent_v2 import resolve_num_iterations
 from imds_secrets import apply_stored_credentials, missing_secret_keys
 apply_stored_credentials(persist=True)
+os.environ["NUM_ITERATIONS"] = str(resolve_num_iterations())
 
 run_btn = widgets.Button(
     description="Run IMDS until complete",
@@ -150,6 +155,7 @@ def _on_run(_):
     with out:
         out.clear_output()
         apply_stored_credentials(persist=True)
+        os.environ["NUM_ITERATIONS"] = str(resolve_num_iterations())
         missing = missing_secret_keys()
         if missing:
             raise RuntimeError(
@@ -159,6 +165,7 @@ def _on_run(_):
         import subprocess, sys
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        env["NUM_ITERATIONS"] = str(resolve_num_iterations())
         proc = subprocess.Popen(
             [sys.executable, "-u", "imds_agent_v2.py"],
             stdout=subprocess.PIPE,
@@ -184,7 +191,11 @@ def _on_run(_):
 
 run_btn.on_click(_on_run)
 display(run_btn, out)
-print("Secrets loaded:", not bool(missing_secret_keys()), "| click the green button")''',
+print(
+    "Secrets loaded:", not bool(missing_secret_keys()),
+    "| rows:", os.environ.get("NUM_ITERATIONS"),
+    "| click the green button",
+)''',
             "one-button",
         ),
     ]

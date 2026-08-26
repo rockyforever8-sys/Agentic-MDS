@@ -23,7 +23,6 @@ SECRET_KEYS = ("IMDS_USERNAME", "IMDS_PASSWORD", "OTP_SECRET")
 OPTIONAL_KEYS = (
     "IMDS_CONTACT_NAME",
     "RECIPIENT_COMPANY_IDS",
-    "NUM_ITERATIONS",
     "IMDS_MASTER_KEY",
 )
 
@@ -89,7 +88,7 @@ def pull_colab_secrets_into_env() -> None:
 
 def _payload_from_env() -> dict[str, str]:
     payload = {}
-    for key in SECRET_KEYS + ("IMDS_CONTACT_NAME", "RECIPIENT_COMPANY_IDS", "NUM_ITERATIONS"):
+    for key in SECRET_KEYS + ("IMDS_CONTACT_NAME", "RECIPIENT_COMPANY_IDS"):
         value = os.getenv(key)
         if value:
             payload[key] = value
@@ -159,6 +158,8 @@ def apply_stored_credentials(*, persist: bool = True) -> None:
         try:
             saved = load_vault(master)
             for key, value in saved.items():
+                if key == "NUM_ITERATIONS":
+                    continue
                 if value and not os.getenv(key):
                     os.environ[key] = str(value)
             log.info("Loaded credentials from encrypted private vault")
