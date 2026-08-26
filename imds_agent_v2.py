@@ -345,12 +345,55 @@ def contact_name_matches(control_text: str, contact_name: str) -> bool:
     return bool(last) and (hay == last or hay.startswith(last + ",") or hay.startswith(last + " "))
 
 
-def is_check_errors_blocking_prompt(text: str) -> bool:
-    """True for the Check-results dialog that disables Propose until errors are fixed."""
+CHECK_COUNTS_RE = re.compile(
+    r"(\d+)\s*Error[(]s[)]\s*(?:/|,)\s*(\d+)\s*Warning[(]s[)]",
+    re.IGNORECASE,
+)
+
+
+def parse_ui_check_counts(text: str) -> tuple[int, int] | None:
+    """Return (errors, warnings) from IMDS Check-results title text, else None."""
+    match = CHECK_COUNTS_RE.search(text or "")
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def is_passing_check_results_text(text: str) -> bool:
+    """True when IMDS Check finished with 0 Error(s) / 0 Warning(s) or 'passed all'."""
     t = " ".join((text or "").lower().split())
+    if "passed all included checks" in t:
+        return True
+    counts = parse_ui_check_counts(text)
+    return counts is not None and counts[0] == 0 and counts[1] == 0
+
+
+def is_check_results_overlay_text(text: str) -> bool:
+    """True for any Check-results overlay, including a clean 0 Error(s) pass."""
+    t = " ".join((text or "").lower().split())
+    if "check results" in t:
+        return True
+    if "passed all included checks" in t:
+        return True
+    return parse_ui_check_counts(text) is not None
+
+
+def is_check_errors_blocking_prompt(text: str) -> bool:
+    """True for the Check-results dialog that disables Propose until errors are fixed.
+
+    Do not treat 'Check results - 0 Error(s) / 0 Warning(s)' as blocking. The word
+    'Error(s)' appears in a passing title.
+    """
+    t = " ".join((text or "").lower().split())
+    counts = parse_ui_check_counts(text)
+    if counts is not None and counts[0] == 0:
+        if "contact must be specified" not in t and "all existing errors need to be eliminated" not in t:
+            return False
     if "contact must be specified" in t:
         return True
     if "all existing errors need to be eliminated" in t:
+        return True
+    if counts is not None and counts[0] > 0:
         return True
     if "further processing may take place" in t and "error" in t:
         return True
@@ -385,7 +428,7 @@ def should_js_strip_modal(*, lookup_iframes: int, dialog_text: str = "", yes_no:
         return False
     if is_check_errors_blocking_prompt(dialog_text):
         return False
-    if "check results" in (dialog_text or "").lower() and "error" in (dialog_text or "").lower():
+    if is_check_results_overlay_text(dialog_text):
         return False
     return True
 
@@ -393,13 +436,28 @@ def should_js_strip_modal(*, lookup_iframes: int, dialog_text: str = "", yes_no:
 def check_results_present(text: str) -> bool:
     """True when Check has produced a result, even if the Message header table is hidden."""
     t = text or ""
-    if re.search(r"\d+\s*Error\(s\)\s*/\s*\d+\s*Warning\(s\)", t):
+    if parse_ui_check_counts(t) is not None:
         return True
     if "passed all included checks" in t.lower():
         return True
-    if "check results" in t.lower() and re.search(r"error\(s\)", t, re.I):
+    if "check results" in t.lower() and re.search(r"error[(]s[)]", t, re.I):
         return True
     return False
+
+
+def preferred_check_result_message(text: str) -> str | None:
+    """Normalize visible Check-panel text to the Excel Check Result string."""
+    if not text:
+        return None
+    if is_passing_check_results_text(text) or parse_ui_check_counts(text):
+        counts = parse_ui_check_counts(text)
+        if counts is not None:
+            errors, warnings = counts
+            return f"Check results - {errors} Error(s) / {warnings} Warning(s)"
+        return "The MDS has passed all included checks."
+    if check_results_present(text):
+        return " ".join(text.split())[:500]
+    return None
 
 
 def parse_mds_id_number(visible: str | None) -> str:
@@ -813,13 +871,17 @@ def close_company_lookup_dialogs(page, max_rounds: int = 8) -> bool:
     return True
 
 
-def close_check_results_dialog(page) -> bool:
-    """Cancel the Check-results overlay (Propose is disabled when errors exist)."""
+def close_check_results_dialog(page, *, any_check_overlay: bool = False) -> bool:
+    """Cancel a Check-results overlay.
+
+    Blocking error dialogs (Contact must be specified) are always cancelled.
+    A passing '0 Error(s) / 0 Warning(s)' overlay is cancelled only when
+    any_check_overlay=True (leaving the MDS to continue the 10-row loop).
+    """
     dialog_text = visible_dialog_text(page)
-    if not (
-        is_check_errors_blocking_prompt(dialog_text)
-        or ("check results" in (dialog_text or "").lower() and "error" in (dialog_text or "").lower())
-    ):
+    blocking = is_check_errors_blocking_prompt(dialog_text)
+    passing_overlay = is_check_results_overlay_text(dialog_text) and not blocking
+    if not blocking and not (any_check_overlay and passing_overlay):
         return False
     used = _click_first_matching(
         page,
@@ -1657,6 +1719,68 @@ def click_first_tree_node(page):
         return False
 
 # ---------- Run Built-in Check ----------
+def wait_networkidle(page, timeout_ms: int = 15000) -> None:
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout_ms)
+    except Exception as e:
+        log.warning(f"networkidle wait ended: {e}")
+
+
+def read_check_results_text(page) -> str:
+    """Read Check-results from the panel/dialog. Avoid a 1s full-page body scrape.
+
+    Large MDS trees (20+ nodes) make body.text_content() time out, so a passing
+    '0 Error(s) / 0 Warning(s)' overlay was missed and logged as Check failed.
+    """
+    chunks = []
+    selectors = (
+        "#pt1\\:dcCheck",
+        "[id*='dcCheck']",
+        "[id*='tChkRes']",
+        "table:has-text('Check results')",
+        "div:has-text('Check results')",
+        ".AFModalDialog",
+        "[id*='pt_dcud']",
+    )
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() == 0:
+                continue
+            for reader in ("inner_text", "text_content"):
+                try:
+                    text = getattr(loc, reader)(timeout=3000) or ""
+                except Exception:
+                    continue
+                if not str(text).strip():
+                    continue
+                chunks.append(str(text))
+                if check_results_present(text) or is_passing_check_results_text(text):
+                    return "\n".join(chunks)
+                break
+        except Exception:
+            continue
+    try:
+        loc = page.get_by_text("Check results", exact=False).first
+        if loc.count() > 0:
+            text = loc.inner_text(timeout=2500) or ""
+            if str(text).strip():
+                chunks.append(str(text))
+                if check_results_present(text) or is_passing_check_results_text(text):
+                    return "\n".join(chunks)
+    except Exception:
+        pass
+    try:
+        body = page.locator("body").inner_text(timeout=8000) or ""
+        chunks.append(body)
+    except Exception:
+        try:
+            chunks.append(page.locator("body").text_content(timeout=8000) or "")
+        except Exception:
+            pass
+    return "\n".join(chunks)
+
+
 def run_check(page):
     log.info("Performing check...")
     try:
@@ -1686,9 +1810,10 @@ def run_check(page):
             log.warning("Check item not found.")
             return False
 
-        if wait_for_check_results(page, timeout_ms=45000):
+        appeared = wait_for_check_results(page, timeout_ms=180000)
+        sample = read_check_results_text(page)
+        if appeared or check_results_present(sample) or is_passing_check_results_text(sample):
             log.info("Check results appeared.")
-            dismiss_modal(page)
             return True
         log.warning("Check results did not appear (no Error(s)/Warning(s) text).")
         return False
@@ -1696,70 +1821,43 @@ def run_check(page):
         log.warning(f"Check failed: {e}")
         return False
 
-def wait_for_check_results(page, timeout_ms: int = 45000) -> bool:
+def wait_for_check_results(page, timeout_ms: int = 180000) -> bool:
     """Wait for Check output. The Message header table is often hidden (pt1:dcCheck:tChkRes::ch::t)."""
     deadline = time.time() + timeout_ms / 1000.0
+    last = ""
     while time.time() < deadline:
-        try:
-            body = page.locator("body").text_content(timeout=1000) or ""
-        except Exception:
-            body = ""
-        if check_results_present(body):
+        last = read_check_results_text(page)
+        if check_results_present(last) or is_passing_check_results_text(last):
             return True
-        try:
-            panel = page.locator("#pt1\\:dcCheck, [id*='dcCheck']").first
-            if panel.count() > 0:
-                panel_text = panel.text_content(timeout=500) or ""
-                if check_results_present(panel_text):
-                    return True
-        except Exception:
-            pass
-        try:
-            attached = page.locator("table:has-text('Check results')").first
-            if attached.count() > 0:
-                txt = attached.text_content(timeout=500) or ""
-                if check_results_present(txt) or "check results" in txt.lower():
-                    return True
-        except Exception:
-            pass
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(750)
+    log.warning(
+        "Check results waiter timed out. Last sample "
+        f"({len(last)} chars): {last[:300]!r}"
+    )
     return False
 
 def extract_check_result(page):
     try:
-        check_table = page.locator("table:has-text('Check results')").first
-        if check_table.count():
-            rows = check_table.locator("tr").all()
-            for row in rows:
-                cells = row.locator("td").all()
-                for cell in cells:
-                    text = cell.text_content().strip()
-                    if text and len(text) > 20 and "Export" not in text and "hidden column" not in text:
-                        return text
-        body = page.locator("body").text_content()
-        match = re.search(r'(The MDS has passed all included checks\.[^.]*\.)', body)
+        text = read_check_results_text(page)
+        preferred = preferred_check_result_message(text)
+        if preferred:
+            return preferred
+        match = re.search(r"(The MDS has passed all included checks\.[^.]*\.)", text or "")
         if match:
             return match.group(1)
-        match = re.search(r'(\d+)\s*Error\(s\)\s*/\s*(\d+)\s*Warning\(s\)', body)
-        if match:
-            errors, warnings = match.groups()
-            return f"{errors} Error(s), {warnings} Warning(s)"
+        counts = parse_ui_check_counts(text or "")
+        if counts is not None:
+            errors, warnings = counts
+            return f"Check results - {errors} Error(s) / {warnings} Warning(s)"
         return "Check result not found"
     except Exception as e:
         log.warning(f"Could not extract check result: {e}")
     return "Unknown"
 
 def is_check_clean(result_msg):
-    if result_msg == "Check failed" or result_msg == "Check result not found":
+    if not result_msg or result_msg in {"Check failed", "Check result not found", "Unknown"}:
         return False
-    match = re.search(r'(\d+)\s*Error\(s\)\s*/\s*(\d+)\s*Warning\(s\)', result_msg)
-    if match:
-        errors = int(match.group(1))
-        warnings = int(match.group(2))
-        return errors == 0 and warnings == 0
-    if "passed all included checks" in result_msg:
-        return True
-    return False
+    return is_passing_check_results_text(result_msg)
 
 # ---------- Handle Forward Confirmation Modal ----------
 def handle_forward_confirmation_modal(page):
@@ -3426,115 +3524,193 @@ def reject_failed_mds(page, results):
     log.info("Rejection of FAIL MDSs completed.")
 
 # ---------- Main Loop ----------
+INBOX_SEARCH_TAB = "//*[@id='pt1:sdiInboxSearch::disAcr']"
+INBOX_FIRST_ROW = "//*[@id='pt1:dcCmds:sfIbLU:pc2:tResult:0:cName']"
+
+
+def return_to_inbox_results(page) -> bool:
+    """Leave an open MDS / Check overlay and show the Received MDSs result list."""
+    log.info("Going back to results page...")
+    close_check_results_dialog(page, any_check_overlay=True)
+    dismiss_modal(page, allow_escape=False)
+    wait_for_glass_pane_clear(page, timeout_ms=4000, allow_escape=False)
+    try:
+        back_btn = page.locator(f"xpath={INBOX_SEARCH_TAB}")
+        if back_btn.count() > 0:
+            back_btn.click(force=True)
+            log.info("Clicked Received MDSs / Inbox search tab.")
+        elif not navigate_to_search_page(page):
+            page.go_back()
+        wait_networkidle(page, 15000)
+        page.wait_for_timeout(1500)
+        close_check_results_dialog(page, any_check_overlay=True)
+        dismiss_modal(page, allow_escape=False)
+        if page.locator(f"xpath={INBOX_FIRST_ROW}").count() > 0:
+            return True
+        if page.locator(f"xpath={XP_ID_FIELD}").count() > 0:
+            return True
+    except Exception as e:
+        log.warning(f"Back to inbox list failed: {e}")
+    if navigate_to_search_page(page):
+        wait_networkidle(page)
+        return True
+    return False
+
+
 def process_rows_and_export(page):
-    back_xpath = "//*[@id='pt1:sdiInboxSearch::disAcr']"
     results = []
 
     for i in range(NUM_ITERATIONS):
         row_xpath = f"//*[@id='pt1:dcCmds:sfIbLU:pc2:tResult:{i}:cName']"
         log.info(f"Processing MDS row {i+1}/{NUM_ITERATIONS} using XPath: {row_xpath}")
+        supplier_code = ""
+        part_no = ""
+        mds_id = "EXTRACTION_FAILED"
+        rule_results = {
+            "parts_marking_check": "Unknown",
+            "recyclate_check": "Unknown",
+            "biocidal_check": "Unknown",
+        }
 
         try:
             row_element = page.locator(row_xpath)
-            row_element.wait_for(state="visible", timeout=10000)
-            log.info(f"Row {i} found and visible.")
-        except Exception as e:
-            log.warning(f"Row {i} not found: {e}. Stopping.")
-            break
-
-        supplier_code = ""
-        part_no = ""
-        status = ""
-        try:
-            row_tr = row_element.locator("xpath=ancestor::tr")
-            cells = row_tr.locator("td").all()
-            if len(cells) >= 8:
-                part_no = cells[3].text_content().strip()
-                supplier_code = cells[6].text_content().strip()
-                if supplier_code == "-":
-                    supplier_code = ""
-                status = cells[7].text_content().strip()
-                log.info(f"Extracted from list: Supplier Code='{supplier_code}', Part/Item No.='{part_no}', Status='{status}'")
-            else:
-                log.warning(f"Row has only {len(cells)} columns; cannot extract all data.")
-        except Exception as e:
-            log.warning(f"Error extracting row data: {e}")
-
-        try:
-            row_element.dblclick(force=True)
-            log.info("Double-clicked row.")
-        except Exception as e:
-            log.warning(f"Double-click failed: {e}. Trying fallback.")
             try:
-                page.locator(row_xpath).dblclick(force=True)
-            except:
-                log.warning("Fallback double-click also failed.")
-                page.locator(row_xpath).click(force=True)
-                page.keyboard.press("Enter")
-                log.info("Used click + Enter to open.")
+                row_element.wait_for(state="visible", timeout=10000)
+            except Exception as e:
+                log.warning(
+                    f"Row {i} not visible ({e}); returning to the Received MDSs list and retrying."
+                )
+                return_to_inbox_results(page)
+                row_element = page.locator(row_xpath)
+                try:
+                    row_element.wait_for(state="visible", timeout=15000)
+                except Exception as e2:
+                    first = page.locator(f"xpath={INBOX_FIRST_ROW}")
+                    if first.count() > 0:
+                        log.info(
+                            f"Inbox list is showing but row {i} is absent; no more MDS rows."
+                        )
+                        break
+                    log.warning(f"Row {i} still not found: {e2}. Continuing with remaining rows.")
+                    raise
+            log.info(f"Row {i} found and visible.")
 
-        page.wait_for_load_state("networkidle", timeout=15000)
-        page.wait_for_timeout(2000)
-        dismiss_modal(page)
+            try:
+                row_tr = row_element.locator("xpath=ancestor::tr")
+                cells = row_tr.locator("td").all()
+                if len(cells) >= 8:
+                    part_no = cells[3].text_content().strip()
+                    supplier_code = cells[6].text_content().strip()
+                    if supplier_code == "-":
+                        supplier_code = ""
+                    status = cells[7].text_content().strip()
+                    log.info(
+                        f"Extracted from list: Supplier Code='{supplier_code}', "
+                        f"Part/Item No.='{part_no}', Status='{status}'"
+                    )
+                else:
+                    log.warning(f"Row has only {len(cells)} columns; cannot extract all data.")
+            except Exception as e:
+                log.warning(f"Error extracting row data: {e}")
 
-        mds_id = extract_mds_id_version_early(page)
-        log.info(f"Extracted ID/Version: {mds_id}")
+            try:
+                row_element.dblclick(force=True)
+                log.info("Double-clicked row.")
+            except Exception as e:
+                log.warning(f"Double-click failed: {e}. Trying fallback.")
+                try:
+                    page.locator(row_xpath).dblclick(force=True)
+                except Exception:
+                    log.warning("Fallback double-click also failed.")
+                    page.locator(row_xpath).click(force=True)
+                    page.keyboard.press("Enter")
+                    log.info("Used click + Enter to open.")
 
-        expand_tree(page)
-        dismiss_modal(page)
+            wait_networkidle(page, 15000)
+            page.wait_for_timeout(2000)
+            dismiss_modal(page)
 
-        if mds_id == "EXTRACTION_FAILED":
             mds_id = extract_mds_id_version_early(page)
-            log.info(f"Retry ID extraction: {mds_id}")
+            log.info(f"Extracted ID/Version: {mds_id}")
 
-        capture_all_material_nodes(page, i+1)
+            expand_tree(page)
+            dismiss_modal(page)
 
-        rule_results = run_checks_on_mds(page, i+1, mds_id)
+            if mds_id == "EXTRACTION_FAILED":
+                mds_id = extract_mds_id_version_early(page)
+                log.info(f"Retry ID extraction: {mds_id}")
 
-        if click_first_tree_node(page):
-            page.wait_for_timeout(1000)
-        else:
-            log.warning("Could not click first tree node; continuing anyway.")
+            capture_all_material_nodes(page, i + 1)
 
-        check_success = run_check(page)
-        if check_success:
-            page.wait_for_timeout(1000)
-            save_screenshot(page, f"mds_check_{i+1}.png")
-            result_msg = extract_check_result(page)
-        else:
-            result_msg = "Check failed"
+            rule_results = run_checks_on_mds(page, i + 1, mds_id)
 
-        check_clean = is_check_clean(result_msg)
-        recyclate_ok = rule_results.get("recyclate_check") == "PASS"
-        biocidal_ok = rule_results.get("biocidal_check") == "PASS"
-        overall = "PASS" if (check_clean and recyclate_ok and biocidal_ok) else "FAIL"
+            if click_first_tree_node(page):
+                page.wait_for_timeout(1000)
+            else:
+                log.warning("Could not click first tree node; continuing anyway.")
 
-        results.append({
-            "MDS ID / Version": mds_id,
-            "Check Result": result_msg,
-            "Parts Marking Check": rule_results.get("parts_marking_check", "Unknown"),
-            "Recyclate Check": rule_results.get("recyclate_check", "Unknown"),
-            "Biocidal Check": rule_results.get("biocidal_check", "Unknown"),
-            "Overall Result": overall,
-            "Supplier Code": supplier_code,
-            "Part/Item No.": part_no,
-            "Action Result": "Pending action",
-        })
-        log.info(f"Row {i+1}: {mds_id} -> Check: {result_msg} | Parts: {rule_results['parts_marking_check']} | Recyclate: {rule_results['recyclate_check']} | Biocidal: {rule_results['biocidal_check']} | Overall: {overall} | Supplier: {supplier_code} | Part: {part_no}")
+            check_success = run_check(page)
+            try:
+                save_screenshot(page, f"mds_check_{i+1}.png")
+            except Exception as e:
+                log.warning(f"Check screenshot failed: {e}")
+            extracted = extract_check_result(page)
+            if is_check_clean(extracted) or check_results_present(extracted):
+                if not check_success:
+                    log.info(f"Check waiter missed the panel; using extracted result: {extracted}")
+                result_msg = extracted
+            elif check_success:
+                result_msg = extracted
+            else:
+                result_msg = "Check failed"
+                log.warning(f"Check waiter failed; extracted {extracted!r}")
+
+            check_clean = is_check_clean(result_msg)
+            recyclate_ok = rule_results.get("recyclate_check") == "PASS"
+            biocidal_ok = rule_results.get("biocidal_check") == "PASS"
+            overall = "PASS" if (check_clean and recyclate_ok and biocidal_ok) else "FAIL"
+
+            results.append({
+                "MDS ID / Version": mds_id,
+                "Check Result": result_msg,
+                "Parts Marking Check": rule_results.get("parts_marking_check", "Unknown"),
+                "Recyclate Check": rule_results.get("recyclate_check", "Unknown"),
+                "Biocidal Check": rule_results.get("biocidal_check", "Unknown"),
+                "Overall Result": overall,
+                "Supplier Code": supplier_code,
+                "Part/Item No.": part_no,
+                "Action Result": "Pending action",
+            })
+            log.info(
+                f"Row {i+1}: {mds_id} -> Check: {result_msg} | "
+                f"Parts: {rule_results['parts_marking_check']} | "
+                f"Recyclate: {rule_results['recyclate_check']} | "
+                f"Biocidal: {rule_results['biocidal_check']} | Overall: {overall} | "
+                f"Supplier: {supplier_code} | Part: {part_no}"
+            )
+        except Exception as e:
+            log.warning(f"Row {i+1} failed: {e}. Continuing with remaining rows.")
+            try:
+                save_screenshot(page, f"mds_row_{i+1}_error.png")
+            except Exception:
+                pass
+            results.append({
+                "MDS ID / Version": mds_id,
+                "Check Result": "Check failed",
+                "Parts Marking Check": rule_results.get("parts_marking_check", "Unknown"),
+                "Recyclate Check": rule_results.get("recyclate_check", "Unknown"),
+                "Biocidal Check": rule_results.get("biocidal_check", "Unknown"),
+                "Overall Result": "FAIL",
+                "Supplier Code": supplier_code,
+                "Part/Item No.": part_no,
+                "Action Result": "Row processing Failed",
+            })
 
         if i < NUM_ITERATIONS - 1:
-            log.info("Going back to results page...")
-            try:
-                back_btn = page.locator(back_xpath)
-                if back_btn.count() > 0:
-                    back_btn.click(force=True)
-                else:
-                    page.go_back()
-                page.wait_for_selector("table", timeout=15000)
-            except:
-                page.go_back()
-            dismiss_modal(page)
-            page.wait_for_timeout(2000)
+            if not return_to_inbox_results(page):
+                log.warning(
+                    "Could not return to the inbox list; will retry at the start of the next row."
+                )
 
     save_check_summary(results)
 

@@ -59,6 +59,8 @@ This notebook runs the **original IMDS agent** (`imds_agent_v2.py`) — same XPa
 
 Optional: `NUM_ITERATIONS` (default **10**; a leftover `3` from earlier debug cells is ignored), `RECIPIENT_COMPANY_IDS` (default `9994,293798`).
 
+A slow or large MDS (for example 26 ingredient nodes) no longer stops the 10-row loop. IMDS Check `0 Error(s) / 0 Warning(s)` is recorded as PASS even when the Check overlay is slow to scrape.
+
 Then click **Run IMDS until complete**. Output: `imds_output/check_summary.xlsx`.""",
             "md-intro",
         ),
