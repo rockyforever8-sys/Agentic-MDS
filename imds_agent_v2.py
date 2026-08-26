@@ -228,19 +228,27 @@ def is_forward_previous_version_prompt(text: str) -> bool:
     return False
 
 
-def mds_id_matches(visible: str | None, expected: str | None) -> bool:
-    if not expected or not visible or visible == "EXTRACTION_FAILED":
-        return False
-    expected = str(expected).strip()
-    compact = visible.replace(" ", "")
-    return expected in compact or expected in visible
-
-
 def parse_mds_id_number(visible: str | None) -> str:
-    if not visible:
+    if not visible or visible == "EXTRACTION_FAILED":
         return ""
     match = re.search(r"(\d{7,})", str(visible))
     return match.group(1) if match else ""
+
+
+def mds_open_status(visible: str | None, expected: str | None) -> str:
+    """Compare numeric MDS IDs only. Version is ignored. None is unknown, not a mismatch."""
+    exp_id = parse_mds_id_number(expected)
+    vis_id = parse_mds_id_number(visible)
+    if not exp_id:
+        return "match" if vis_id else "unknown"
+    if not vis_id:
+        return "unknown"
+    return "match" if vis_id == exp_id else "mismatch"
+
+
+def mds_id_matches(visible: str | None, expected: str | None) -> bool:
+    """True when the numeric MDS ID matches. Version (2 vs 0.02 vs 1.01) is ignored."""
+    return mds_open_status(visible, expected) == "match"
 
 def get_otp():
     return pyotp.TOTP(OTP_SECRET.replace(" ", "").upper()).now()
@@ -412,23 +420,64 @@ def wait_for_glass_pane_clear(page, timeout_ms: int = 8000, allow_escape: bool =
 
 
 def read_visible_mds_id(page) -> str | None:
-    """Read ID / Version without a long wait — leftover MDS would otherwise look 'ready'."""
+    """Read ID / Version from the details panel. Do not require Playwright is_visible().
+
+    Scoring already finds this field after a double-click. A missing read means
+    the page is still loading, not that a different MDS is open.
+    """
+    id_ver = re.compile(r"(\d{7,}\s*/\s*[\d.]+)")
     try:
-        label = page.locator("td:has-text('ID / Version')")
-        if label.count() == 0:
-            return None
-        cell = label.first
-        if not cell.is_visible():
-            return None
-        next_cell = cell.locator("xpath=following-sibling::td")
-        if next_cell.count() == 0:
-            return None
-        val = next_cell.first.text_content()
-        if val and val.strip():
-            return val.strip()
+        labels = page.locator("td:has-text('ID / Version')")
+        n = min(int(labels.count()), 12)
+        for i in range(n):
+            cell = labels.nth(i)
+            own = ""
+            try:
+                own = (cell.text_content() or "").strip()
+            except Exception:
+                own = ""
+            found = id_ver.search(own)
+            if found:
+                return found.group(1)
+            try:
+                nxt = cell.locator("xpath=following-sibling::td")
+                if nxt.count():
+                    val = (nxt.first.text_content() or "").strip()
+                    found = id_ver.search(val)
+                    if found:
+                        return found.group(1)
+                    if parse_mds_id_number(val):
+                        return val
+            except Exception:
+                continue
     except Exception:
-        return None
+        pass
+    try:
+        expand = page.locator(f"xpath={XP_INGREDIENTS_EXPAND}")
+        if expand.count() == 0:
+            return None
+        body = page.locator("body").text_content(timeout=1500) or ""
+        found = id_ver.search(body)
+        if found:
+            return found.group(1)
+    except Exception:
+        pass
     return None
+
+
+def ingredients_tree_ready(page) -> bool:
+    """True when the Ingredients tree/details are in the DOM (visibility not required)."""
+    for sel in (
+        f"xpath={XP_INGREDIENTS_EXPAND}",
+        f"xpath={XP_INGREDIENTS_EXPAND}/table",
+        "label:has-text('MDS Supplier')",
+    ):
+        try:
+            if page.locator(sel).count() > 0:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def dismiss_modal(page, allow_escape: bool = True):
@@ -2216,42 +2265,59 @@ def click_ingredients_tab(page) -> bool:
 def wait_for_mds_content_page(page, expected_id: str | None = None) -> bool:
     """Stay on the MDS Ingredients page (ID / Version + tree).
 
-    Do not click Ingredients first when expected_id is set: that tab can still
-    show a leftover own MDS from a previous Yes-on-forward prompt.
-    MDS menu exists on search too, so do not use it as the ready signal.
+    Match the numeric MDS ID only (ignore version). A missing ID read is
+    'still loading', not a leftover sheet. Only a *different* numeric ID is a
+    mismatch. Do not click Ingredients just because the ID is not parsed yet —
+    that interrupted the open in Colab and produced 'Opened MDS None'.
     """
     dismiss_modal(page, allow_escape=False)
     last_id = None
-    matched = expected_id is None
+    last_status = "unknown"
     wrong_streak = 0
-    for i in range(24):
-        wait_for_glass_pane_clear(page, timeout_ms=1500, allow_escape=False)
-        last_id = read_visible_mds_id(page)
-        if expected_id:
-            if last_id and mds_id_matches(last_id, expected_id):
-                matched = True
-                break
-            if last_id and not mds_id_matches(last_id, expected_id):
-                wrong_streak += 1
-                if wrong_streak >= 8:
-                    log.warning(
-                        f"On-screen MDS {last_id} stayed different from expected {expected_id}; "
-                        "not clicking Ingredients on the leftover sheet."
-                    )
-                    break
-            else:
-                wrong_streak = 0
-        elif last_id:
-            matched = True
-            break
-        if i == 8 and not last_id:
-            click_ingredients_tab(page)
-        page.wait_for_timeout(500)
+    tree_ready = False
 
-    if expected_id and not matched:
-        log.warning(f"Opened MDS {last_id} does not match expected ID {expected_id}.")
-        save_screenshot(page, "mds_id_mismatch.png")
-        return False
+    for i in range(30):
+        wait_for_glass_pane_clear(page, timeout_ms=800, allow_escape=False)
+        last_id = read_visible_mds_id(page)
+        last_status = mds_open_status(last_id, expected_id)
+        tree_ready = ingredients_tree_ready(page)
+
+        if last_status == "match":
+            log.info(f"On-screen MDS ID matches {parse_mds_id_number(expected_id) or expected_id}: {last_id}")
+            break
+        if last_status == "mismatch":
+            wrong_streak += 1
+            if wrong_streak >= 8:
+                log.warning(
+                    f"On-screen MDS {last_id} stayed different from expected {expected_id}; "
+                    "not clicking Ingredients on the leftover sheet."
+                )
+                save_screenshot(page, "mds_id_mismatch.png")
+                return False
+        else:
+            wrong_streak = 0
+
+        if last_status == "unknown" and tree_ready and i >= 4:
+            extracted = extract_mds_id_version_early(page)
+            if extracted and extracted != "EXTRACTION_FAILED":
+                last_id = extracted
+                last_status = mds_open_status(last_id, expected_id)
+            if last_status == "match":
+                log.info(f"MDS ID/Version after scoring-style extract: {last_id}")
+                break
+            if last_status == "mismatch":
+                continue
+            log.info(
+                f"Ingredients tree is open; ID/Version not parsed yet "
+                f"(expected {expected_id}). Continuing without requiring a full ID/Version string."
+            )
+            break
+        page.wait_for_timeout(400)
+    else:
+        if last_status == "mismatch":
+            log.warning(f"Opened MDS {last_id} does not match expected ID {expected_id}.")
+            save_screenshot(page, "mds_id_mismatch.png")
+            return False
 
     click_ingredients_tab(page)
     landmarks = [
@@ -2263,11 +2329,14 @@ def wait_for_mds_content_page(page, expected_id: str | None = None) -> bool:
     ]
     ready = False
     for _ in range(20):
-        dismiss_modal(page)
+        dismiss_modal(page, allow_escape=False)
+        if ingredients_tree_ready(page):
+            ready = True
+            break
         for sel in landmarks:
             try:
                 loc = page.locator(sel)
-                if loc.count() > 0 and loc.first.is_visible():
+                if loc.count() > 0:
                     ready = True
                     break
             except Exception:
@@ -2279,12 +2348,18 @@ def wait_for_mds_content_page(page, expected_id: str | None = None) -> bool:
         log.warning("MDS Ingredients page did not load. Accept/Forward stay inactive on the search list.")
         save_screenshot(page, "mds_content_page_not_loaded.png")
         return False
-    mds_id = extract_mds_id_version_early(page)
+    mds_id = read_visible_mds_id(page) or extract_mds_id_version_early(page)
     log.info(f"MDS Ingredients page is open. ID/Version={mds_id}")
-    if expected_id and not mds_id_matches(mds_id, expected_id):
+    status = mds_open_status(mds_id, expected_id)
+    if status == "mismatch":
         log.warning(f"Opened MDS {mds_id} does not match expected ID {expected_id}.")
         save_screenshot(page, "mds_id_mismatch.png")
         return False
+    if expected_id and status == "unknown":
+        log.warning(
+            f"Could not parse ID/Version after open (got {mds_id!r}); "
+            f"Ingredients page is open, continuing with expected ID {expected_id}."
+        )
     return True
 
 
@@ -2360,7 +2435,7 @@ def _double_click_first_result(page, mds_id_num: str) -> bool:
 
 
 def open_first_result_on_content_page(page, mds_id_num: str) -> bool:
-    """Double-click the first result and wait until ID / Version matches that MDS."""
+    """Double-click the first result and wait for the Ingredients page for that MDS ID."""
     for attempt in range(1, 4):
         if not _double_click_first_result(page, mds_id_num):
             return False
@@ -2368,8 +2443,7 @@ def open_first_result_on_content_page(page, mds_id_num: str) -> bool:
             save_screenshot(page, f"after_open_content_{mds_id_num}.png")
             return True
         log.warning(
-            f"Open attempt {attempt}/3 for {mds_id_num} showed a different MDS. "
-            "Returning to search instead of using leftover Ingredients."
+            f"Open attempt {attempt}/3 for {mds_id_num} did not confirm the Ingredients page."
         )
         save_screenshot(page, f"after_doubleclick_{mds_id_num}.png")
         if attempt < 3:
@@ -2407,7 +2481,7 @@ def accept_passed_mds(page, results):
         page.wait_for_timeout(1500)
         wait_for_glass_pane_clear(page, timeout_ms=5000)
         current_id = read_visible_mds_id(page) or extract_mds_id_version_early(page)
-        auto_forwarded = bool(current_id) and not mds_id_matches(current_id, mds_id_num)
+        auto_forwarded = mds_open_status(current_id, mds_id_num) == "mismatch"
         if auto_forwarded:
             new_id = parse_mds_id_number(current_id) or current_id
             log.warning(

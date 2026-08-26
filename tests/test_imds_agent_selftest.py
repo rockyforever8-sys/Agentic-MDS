@@ -57,10 +57,18 @@ class ForwardPromptHelpers(unittest.TestCase):
         self.assertFalse(imds_agent_v2.is_forward_previous_version_prompt("Clicked Inbox button"))
         self.assertFalse(imds_agent_v2.is_forward_previous_version_prompt("Forward menu"))
 
-    def test_mds_id_matches_rejects_leftover_own_mds(self):
+    def test_mds_id_matches_numeric_id_only(self):
+        self.assertTrue(imds_agent_v2.mds_id_matches("1522070544 / 2", "1522070544"))
+        self.assertTrue(imds_agent_v2.mds_id_matches("1522070544 / 2.00", "1522070544"))
+        self.assertTrue(imds_agent_v2.mds_id_matches("1503991331 / 0.02", "1503991331"))
         self.assertTrue(imds_agent_v2.mds_id_matches("1521938290 / 1", "1521938290"))
         self.assertFalse(imds_agent_v2.mds_id_matches("1522107776 / 1.01", "1521938290"))
         self.assertFalse(imds_agent_v2.mds_id_matches("1522107776 / 1.01", "1430442417"))
+        self.assertFalse(imds_agent_v2.mds_id_matches(None, "1522070544"))
+        self.assertEqual(imds_agent_v2.mds_open_status(None, "1522070544"), "unknown")
+        self.assertEqual(imds_agent_v2.mds_open_status("EXTRACTION_FAILED", "1522070544"), "unknown")
+        self.assertEqual(imds_agent_v2.mds_open_status("1522070544 / 2", "1522070544"), "match")
+        self.assertEqual(imds_agent_v2.mds_open_status("1522107776 / 1.01", "1522070544"), "mismatch")
         self.assertEqual(imds_agent_v2.parse_mds_id_number("1522107776 / 1.01"), "1522107776")
 
 
