@@ -22,6 +22,12 @@ python -m ppap_agent batch
 # Interactive Streamlit demo
 streamlit run ppap_agent/demo.py
 
+# Animated workflow demo (recommended)
+streamlit run ppap_agent/demo_animated.py
+
+# Google Colab — open PPAP_Colab_Start_Here.ipynb
+# Or run: python colab_ppap_demo.py
+
 # Run tests
 python -m unittest discover -s tests -v
 ```
@@ -81,8 +87,17 @@ ppap_agent/
 ├── rules/
 │   └── decisions.py      # SQE decision engine
 ├── state.py              # TypedDict state schema
-├── cli.py                # Command-line interface
-└── demo.py               # Streamlit demo UI
+├── visualization.py    # Animated graph HTML + streaming
+├── demo.py             # Streamlit demo UI
+└── demo_animated.py    # Animated Streamlit demo (recommended)
+```
+
+## Google Colab
+
+Open [PPAP_Colab_Start_Here.ipynb](../PPAP_Colab_Start_Here.ipynb) in Colab for animated graph visualization.
+
+```python
+%run colab_ppap_demo.py
 ```
 
 ## Productivity Impact (Projected)
