@@ -8,10 +8,13 @@ Overall Result ignores Parts Marking Check per user request.
 Acceptance phase uses filter "Browsed" only.
 Fixed: previous-version forward prompt must be dismissed with No (Yes
 creates a new own-MDS ID and breaks later search/reject).
-Fixed: "Do you want to save your changes?" must be answered with Yes so
-tab switches after Forward can reach Supplier Data / Recipient Data.
-Never JS-strip that dialog — that leaves the new own MDS stuck and later
-opens read the leftover ID.
+Fixed: "Do you want to save your changes?" Yes on same-MDS tab switches
+(Supplier Data / Recipient Data after Forward). No when leaving a leftover
+own MDS to search/open the next received row — Yes keeps the leftover ID
+and mismatches every later row.
+Never JS-strip that dialog.
+Preferred contact is Qu, Theresa; any other real name in the Supplier Data
+dropdown is allowed if Theresa cannot be selected (blank / Please select is not).
 After Forward, IMDS mints a new own-MDS ID (version 0.01). Contact person,
 Add Recipient, and Propose must finish on that new ID before the next
 received MDS is searched.
@@ -154,6 +157,7 @@ def action_result_is_complete(action: str) -> bool:
 
 NUM_ITERATIONS = resolve_num_iterations()
 RECIPIENT_IDS = [x.strip() for x in os.getenv("RECIPIENT_COMPANY_IDS", "9994,293798").split(",") if x.strip()]
+DEFAULT_CONTACT_NAME = "Qu, Theresa"
 IMDS_USERNAME = os.getenv("IMDS_USERNAME", "")
 IMDS_PASSWORD = os.getenv("IMDS_PASSWORD", "")
 OTP_SECRET = os.getenv("OTP_SECRET", "")
@@ -393,6 +397,49 @@ def contact_display_value(control_text: str) -> str:
 def contact_is_blank(display: str) -> bool:
     t = " ".join((display or "").lower().split())
     return t in {"", "-", "–", "—", "select", "please select", "no data", "none"}
+
+
+def preferred_contact_name(raw: str | None = None) -> str:
+    """Preferred Supplier Data contact. Default Qu, Theresa; IMDS_CONTACT_NAME overrides."""
+    if raw is None:
+        raw = os.getenv("IMDS_CONTACT_NAME", "")
+    text = str(raw or "").strip()
+    return text or DEFAULT_CONTACT_NAME
+
+
+def contact_option_is_usable(name: str) -> bool:
+    """True for a real contact in the dropdown — not blank, '-', or Please select."""
+    display = contact_display_value(name)
+    if contact_is_blank(display):
+        return False
+    t = " ".join(display.lower().split()).rstrip(":")
+    if t in {"option-list", "option list"}:
+        return False
+    return len(display) <= 80
+
+
+def parse_contact_option_names(text: str) -> list[str]:
+    """Usable names from an ADF option-list dump or a newline-separated list."""
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add(token: str) -> None:
+        s = " ".join((token or "").replace("\u00a0", " ").split())
+        s = s.strip("[]'\" ,")
+        if not contact_option_is_usable(s):
+            return
+        key = s.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        names.append(s)
+
+    raw = text or ""
+    for match in re.finditer(r"['\"]([^'\"]+)['\"]", raw):
+        add(match.group(1))
+    for line in raw.splitlines():
+        add(line.strip().rstrip(","))
+    return names
 
 
 def contact_name_matches(control_text: str, contact_name: str) -> bool:
@@ -1046,7 +1093,17 @@ def close_check_results_dialog(page, *, any_check_overlay: bool = False) -> bool
     return True
 
 
-def wait_for_glass_pane_clear(page, timeout_ms: int = 8000, allow_escape: bool = True) -> bool:
+def _save_changes_choice(save_changes: str | None) -> str:
+    t = (save_changes or "yes").strip().lower()
+    return "no" if t in {"no", "discard", "leave"} else "yes"
+
+
+def wait_for_glass_pane_clear(
+    page,
+    timeout_ms: int = 8000,
+    allow_escape: bool = True,
+    save_changes: str = "yes",
+) -> bool:
     """Dismiss leftover IMDS dialogs so they cannot intercept later clicks."""
     deadline = time.time() + timeout_ms / 1000.0
     while time.time() < deadline:
@@ -1054,7 +1111,7 @@ def wait_for_glass_pane_clear(page, timeout_ms: int = 8000, allow_escape: bool =
             close_company_lookup_dialogs(page)
         if not modal_dialog_visible(page) and lookup_company_iframe_count(page) == 0:
             return True
-        dismiss_modal(page, allow_escape=allow_escape)
+        dismiss_modal(page, allow_escape=allow_escape, save_changes=save_changes)
         page.wait_for_timeout(400)
     return not modal_dialog_visible(page) and lookup_company_iframe_count(page) == 0
 
@@ -1120,7 +1177,7 @@ def ingredients_tree_ready(page) -> bool:
     return False
 
 
-def dismiss_modal(page, allow_escape: bool = True):
+def dismiss_modal(page, allow_escape: bool = True, save_changes: str = "yes"):
     log.info("Attempting to dismiss modal...")
     if lookup_company_iframe_count(page) > 0:
         log.info("Company lookup dialog is open; cancelling leftover lookup instead of stripping it.")
@@ -1144,6 +1201,14 @@ def dismiss_modal(page, allow_escape: bool = True):
     if is_save_changes_prompt(dialog_text) or (
         yes_no_buttons_visible(page) and "save" in (dialog_text or "").lower()
     ):
+        if _save_changes_choice(save_changes) == "no":
+            log.info(
+                "Save-changes prompt is showing; clicking No so the leftover own MDS is discarded."
+            )
+            if click_modal_no(page, reason="save-changes leave-sheet"):
+                return True
+            log.warning("Could not click No on save-changes; not stripping the dialog.")
+            return False
         log.info("Save-changes prompt is showing; clicking Yes so tab switches keep the forwarded MDS.")
         if click_modal_yes(page, reason="save-changes prompt"):
             return True
@@ -1276,7 +1341,7 @@ def navigate_to_search_page(page):
         log.warning("Session is on the public login page; logging in again.")
         imds_login(page)
     for _ in range(4):
-        dismiss_modal(page, allow_escape=False)
+        dismiss_modal(page, allow_escape=False, save_changes="no")
         page.wait_for_timeout(400)
         if not modal_dialog_visible(page):
             break
@@ -1287,15 +1352,15 @@ def navigate_to_search_page(page):
             received_mds_link.click()
             log.info("Clicked 'Received MDSs' link.")
             page.wait_for_timeout(800)
-            dismiss_modal(page, allow_escape=False)
-            wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False)
+            dismiss_modal(page, allow_escape=False, save_changes="no")
+            wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False, save_changes="no")
             page.wait_for_load_state("networkidle", timeout=15000)
             page.wait_for_timeout(1500)
             if page.locator(f"xpath={XP_ID_FIELD}").count() > 0:
                 log.info("Successfully navigated to search page via Received MDSs link.")
                 return True
             if modal_dialog_visible(page):
-                dismiss_modal(page, allow_escape=False)
+                dismiss_modal(page, allow_escape=False, save_changes="no")
                 received_mds_link = page.locator("a:has-text('Received MDSs'):visible").first
                 if received_mds_link.count() > 0:
                     received_mds_link.click()
@@ -1311,6 +1376,8 @@ def navigate_to_search_page(page):
         if back_btn.count() > 0 and back_btn.is_visible():
             back_btn.click(force=True)
             log.info("Clicked MDS Request tab (back).")
+            dismiss_modal(page, allow_escape=False, save_changes="no")
+            wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False, save_changes="no")
             page.wait_for_load_state("networkidle", timeout=15000)
             page.wait_for_timeout(2000)
             if page.locator(f"xpath={XP_ID_FIELD}").count() > 0:
@@ -2489,9 +2556,68 @@ def forward_mds(page):
     return True
 
 # ---------- Select Contact Person ----------
-def select_contact_person(page, contact_name="Qu, Theresa"):
-    """Select the supplier contact on the forwarded *own* MDS (ADF select is often not Playwright-visible)."""
-    log.info(f"Selecting contact person: {contact_name}")
+def list_contact_option_names(page) -> list[str]:
+    """Usable names currently in the Supplier Data Contact Person control."""
+    collected: list[str] = []
+    selectors = list(XP_CONTACT_SELECTORS) + list(XP_CONTACT_FALLBACKS) + ["select[id*='socContact']"]
+    for xp in selectors:
+        try:
+            loc = page.locator(xp if xp.startswith("select") else f"xpath={xp}").first
+            if loc.count() == 0:
+                continue
+            texts = loc.evaluate(
+                """el => {
+                    const sel = el.tagName === 'SELECT' ? el
+                        : (el.querySelector && el.querySelector('select'));
+                    if (sel && sel.options)
+                        return [...sel.options].map(o => (o.text || '').trim());
+                    return [];
+                }"""
+            )
+            if texts:
+                collected.extend(texts)
+        except Exception:
+            continue
+    try:
+        for sel in ("[role='option']", "li.ui-selectonemenu-item", "li[role='option']"):
+            opts = page.locator(sel)
+            n = min(int(opts.count()), 40)
+            for i in range(n):
+                try:
+                    collected.append(opts.nth(i).inner_text(timeout=400) or "")
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    try:
+        content = page.locator("xpath=//*[@id='pt1:dcSupp:socContact::content']").first
+        if content.count() > 0:
+            collected.extend(parse_contact_option_names(content.inner_text(timeout=800) or ""))
+    except Exception:
+        pass
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw in collected:
+        for name in parse_contact_option_names(raw) if "\n" in (raw or "") else [raw]:
+            if not contact_option_is_usable(name):
+                continue
+            key = " ".join(name.lower().split())
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(name.strip())
+    return names
+
+
+def select_contact_person(page, contact_name=None, allow_fallback=True):
+    """Select the supplier contact on the forwarded *own* MDS (ADF select is often not Playwright-visible).
+
+    Preferred name is Qu, Theresa (or IMDS_CONTACT_NAME). If that option is missing,
+    any other real name in the dropdown is accepted so Propose is not blocked by
+    'Contact must be specified'. Blank / '-' / Please select is never a contact.
+    """
+    preferred = preferred_contact_name(contact_name)
+    log.info(f"Selecting contact person: {preferred}")
 
     def _control_text(loc) -> str:
         if loc is None:
@@ -2541,44 +2667,58 @@ def select_contact_person(page, contact_name="Qu, Theresa"):
             pass
         return None
 
-    def _selected() -> bool:
+    def _displayed() -> str:
         sel = _first_select()
-        if sel is not None and contact_name_matches(_control_text(sel), contact_name):
-            return True
+        if sel is not None:
+            shown = _control_text(sel)
+            if shown:
+                return shown
         try:
             content = page.locator("xpath=//*[@id='pt1:dcSupp:socContact::content']").first
-            if content.count() > 0 and contact_name_matches(_control_text(content), contact_name):
-                return True
+            if content.count() > 0:
+                return _control_text(content)
         except Exception:
             pass
-        return False
+        return ""
 
-    try:
+    def _matches(name: str) -> bool:
+        return contact_name_matches(_displayed(), name)
+
+    def _locate_dropdown():
         dropdown = _first_select()
-        if dropdown is None:
-            log.warning("Contact dropdown not found via exact XPath; trying fallback XPaths.")
-            found = False
-            for fxp in XP_CONTACT_FALLBACKS:
-                try:
-                    alt = page.locator(f"xpath={fxp}").first
-                    if alt.count() > 0:
-                        dropdown = alt
-                        log.info(f"Found contact control via fallback XPath: {fxp}")
-                        found = True
-                        break
-                except Exception:
-                    continue
-            if not found:
-                log.warning("Contact dropdown not found after all fallbacks.")
-                return False
+        if dropdown is not None:
+            return dropdown
+        log.warning("Contact dropdown not found via exact XPath; trying fallback XPaths.")
+        for fxp in XP_CONTACT_FALLBACKS:
+            try:
+                alt = page.locator(f"xpath={fxp}").first
+                if alt.count() > 0:
+                    log.info(f"Found contact control via fallback XPath: {fxp}")
+                    return alt
+            except Exception:
+                continue
+        return None
 
-        if _selected():
-            log.info(f"Contact already {contact_name}; skipping re-select.")
+    def _close_dropdown():
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(200)
+        except Exception:
+            pass
+
+    def _attempt(name: str) -> bool:
+        dropdown = _locate_dropdown()
+        if dropdown is None:
+            log.warning("Contact dropdown not found after all fallbacks.")
+            return False
+
+        if _matches(name):
+            log.info(f"Contact already {name}; skipping re-select.")
             save_screenshot(page, "after_contact_selection.png")
             return True
         try:
             shown = _control_text(dropdown)
-            log.info(f"Contact display value: {shown!r}; selecting {contact_name}.")
+            log.info(f"Contact display value: {shown!r}; selecting {name}.")
         except Exception:
             pass
 
@@ -2589,10 +2729,10 @@ def select_contact_person(page, contact_name="Qu, Theresa"):
             except Exception:
                 tag = ""
             if tag == "select":
-                dropdown.select_option(label=contact_name, timeout=4000)
-                log.info(f"Selected {contact_name} via select_option")
+                dropdown.select_option(label=name, timeout=4000)
+                log.info(f"Selected {name} via select_option")
                 page.wait_for_timeout(400)
-                if _selected():
+                if _matches(name):
                     save_screenshot(page, "after_contact_selection.png")
                     return True
             else:
@@ -2612,12 +2752,12 @@ def select_contact_person(page, contact_name="Qu, Theresa"):
                     sel.dispatchEvent(new Event('change', { bubbles: true }));
                     return true;
                 }""",
-                contact_name,
+                name,
             )
             if js_ok:
-                log.info(f"Selected {contact_name} via DOM change event")
+                log.info(f"Selected {name} via DOM change event")
                 page.wait_for_timeout(400)
-                if _selected():
+                if _matches(name):
                     save_screenshot(page, "after_contact_selection.png")
                     return True
         except Exception as e:
@@ -2636,12 +2776,12 @@ def select_contact_person(page, contact_name="Qu, Theresa"):
 
         option = None
         locators = [
-            f"option:has-text('{contact_name}')",
-            f"li:has-text('{contact_name}')",
-            f"span:has-text('{contact_name}')",
-            f"a:has-text('{contact_name}')",
-            f"[role='option']:has-text('{contact_name}')",
-            f"text='{contact_name}'",
+            f"option:has-text('{name}')",
+            f"li:has-text('{name}')",
+            f"span:has-text('{name}')",
+            f"a:has-text('{name}')",
+            f"[role='option']:has-text('{name}')",
+            f"text='{name}'",
         ]
         for loc in locators:
             try:
@@ -2655,17 +2795,42 @@ def select_contact_person(page, contact_name="Qu, Theresa"):
 
         if option is not None and option.count() > 0:
             option.click(force=True)
-            log.info(f"Selected {contact_name} from custom dropdown")
+            log.info(f"Selected {name} from custom dropdown")
             page.wait_for_timeout(400)
             save_screenshot(page, "after_contact_selection.png")
-            if _selected():
+            if _matches(name):
                 return True
             log.warning(
-                f"Clicked {contact_name} in the dropdown but the displayed value is still not that contact."
+                f"Clicked {name} in the dropdown but the displayed value is still not that contact."
             )
+            _close_dropdown()
             return False
 
-        log.warning(f"Option '{contact_name}' not found.")
+        log.warning(f"Option '{name}' not found.")
+        _close_dropdown()
+        return False
+
+    try:
+        if _attempt(preferred):
+            return True
+        if not allow_fallback:
+            return False
+
+        options = list_contact_option_names(page)
+        fallbacks = [n for n in options if not contact_name_matches(n, preferred)]
+        log.info(
+            f"Preferred contact {preferred} unavailable; usable contacts: {fallbacks or options}."
+        )
+        for name in fallbacks:
+            log.info(f"Preferred contact {preferred} unavailable; selecting {name}.")
+            if _attempt(name):
+                return True
+
+        shown = _displayed()
+        if contact_option_is_usable(shown):
+            log.info(f"Preferred contact {preferred} unavailable; using displayed {shown}.")
+            save_screenshot(page, "after_contact_selection.png")
+            return True
         return False
     except Exception as e:
         log.warning(f"Error selecting contact person: {e}")
@@ -2913,7 +3078,7 @@ def complete_forward_recipients(page, supplier_code, part_no):
         _open_detail_tab(page, XP_SUPPLIER_DATA, "Supplier Data", "supplier_data.png")
         for _ in range(6):
             dismiss_modal(page, allow_escape=False)
-            if select_contact_person(page, "Qu, Theresa"):
+            if select_contact_person(page):
                 contact_ok = True
                 break
             page.wait_for_timeout(500)
@@ -3307,7 +3472,9 @@ def click_ingredients_tab(page) -> bool:
     return False
 
 
-def wait_for_mds_content_page(page, expected_id: str | None = None) -> bool:
+def wait_for_mds_content_page(
+    page, expected_id: str | None = None, save_changes: str = "no"
+) -> bool:
     """Stay on the MDS Ingredients page (ID / Version + tree).
 
     Match the numeric MDS ID only (ignore version). A missing ID read is
@@ -3317,14 +3484,16 @@ def wait_for_mds_content_page(page, expected_id: str | None = None) -> bool:
     Do not click Ingredients on a leftover own MDS whose ID already differs.
     """
     close_company_lookup_dialogs(page)
-    dismiss_modal(page, allow_escape=False)
+    dismiss_modal(page, allow_escape=False, save_changes=save_changes)
     last_id = None
     last_status = "unknown"
     wrong_streak = 0
     tree_ready = False
 
     for i in range(30):
-        wait_for_glass_pane_clear(page, timeout_ms=800, allow_escape=False)
+        wait_for_glass_pane_clear(
+            page, timeout_ms=800, allow_escape=False, save_changes=save_changes
+        )
         last_id = read_visible_mds_id(page)
         last_status = mds_open_status(last_id, expected_id)
         tree_ready = ingredients_tree_ready(page)
@@ -3388,7 +3557,7 @@ def wait_for_mds_content_page(page, expected_id: str | None = None) -> bool:
     ]
     ready = False
     for _ in range(20):
-        dismiss_modal(page, allow_escape=False)
+        dismiss_modal(page, allow_escape=False, save_changes=save_changes)
         if ingredients_tree_ready(page):
             ready = True
             break
@@ -3445,7 +3614,7 @@ def _fill_id_and_search(page, mds_id_num: str) -> bool:
         log.info("Clicked Search button.")
         page.wait_for_load_state("networkidle", timeout=15000)
         page.wait_for_timeout(3000)
-        wait_for_glass_pane_clear(page, timeout_ms=3000)
+        wait_for_glass_pane_clear(page, timeout_ms=3000, save_changes="no")
         return True
     except Exception as e:
         log.warning(f"Failed to click Search button: {e}.")
@@ -3458,10 +3627,10 @@ def search_mds_by_id(page, mds_id_num: str) -> bool:
     If Browsed-only returns no rows, retry with all statuses. Opening the MDS
     still marks it browsed so Accept stays active.
     """
-    wait_for_glass_pane_clear(page, timeout_ms=5000)
+    wait_for_glass_pane_clear(page, timeout_ms=5000, save_changes="no")
     if not navigate_to_search_page(page):
         return False
-    wait_for_glass_pane_clear(page, timeout_ms=3000)
+    wait_for_glass_pane_clear(page, timeout_ms=3000, save_changes="no")
     set_browsed_filter(page)
     if not _fill_id_and_search(page, mds_id_num):
         return False
@@ -3474,7 +3643,7 @@ def search_mds_by_id(page, mds_id_num: str) -> bool:
 
 
 def _double_click_first_result(page, mds_id_num: str) -> bool:
-    wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False)
+    wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False, save_changes="no")
     name_cell = page.locator(f"xpath={XP_FIRST_RESULT_NAME}")
     row = None
     try:
@@ -3498,7 +3667,7 @@ def _double_click_first_result(page, mds_id_num: str) -> bool:
         log.info(f"Double-clicked first result for {mds_id_num}")
         page.wait_for_load_state("networkidle", timeout=15000)
         page.wait_for_timeout(2000)
-        wait_for_glass_pane_clear(page, timeout_ms=4000, allow_escape=False)
+        wait_for_glass_pane_clear(page, timeout_ms=4000, allow_escape=False, save_changes="no")
         return True
     except Exception as e:
         log.warning(f"Double-click failed: {e}")
@@ -3507,7 +3676,7 @@ def _double_click_first_result(page, mds_id_num: str) -> bool:
             page.keyboard.press("Enter")
             page.wait_for_load_state("networkidle", timeout=15000)
             page.wait_for_timeout(2000)
-            wait_for_glass_pane_clear(page, timeout_ms=4000, allow_escape=False)
+            wait_for_glass_pane_clear(page, timeout_ms=4000, allow_escape=False, save_changes="no")
             log.info("Opened row via click + Enter fallback.")
             return True
         except Exception as e2:
@@ -3587,10 +3756,10 @@ def accept_passed_mds(page, results):
             click_ingredients_tab(page)
             forward_note = "Auto-forwarded"
         else:
-            if not wait_for_mds_content_page(page, expected_id=mds_id_num):
+            if not wait_for_mds_content_page(page, expected_id=mds_id_num, save_changes="yes"):
                 log.warning("Left Ingredients page after Accept; clicking Ingredients before Forward.")
                 click_ingredients_tab(page)
-                wait_for_mds_content_page(page, expected_id=mds_id_num)
+                wait_for_mds_content_page(page, expected_id=mds_id_num, save_changes="yes")
             if not forward_mds(page):
                 log.warning("Forwarding failed; still attempting recipient/propose on the open MDS.")
                 forward_note = "Forward Failed"
@@ -3632,7 +3801,7 @@ def accept_passed_mds(page, results):
         close_check_results_dialog(page)
         if not navigate_to_search_page(page):
             log.warning("Could not return to Received MDSs search after propose; leftover MDS may remain open.")
-        wait_for_glass_pane_clear(page, timeout_ms=4000)
+        wait_for_glass_pane_clear(page, timeout_ms=4000, save_changes="no")
 
     log.info("Acceptance, forwarding, and recipient assignment completed.")
 
@@ -3678,7 +3847,7 @@ def reject_failed_mds(page, results):
 
         if not navigate_to_search_page(page):
             log.warning("Could not return to Received MDSs search after reject.")
-        wait_for_glass_pane_clear(page, timeout_ms=4000)
+        wait_for_glass_pane_clear(page, timeout_ms=4000, save_changes="no")
 
     log.info("Rejection of FAIL MDSs completed.")
 
@@ -3691,8 +3860,8 @@ def return_to_inbox_results(page) -> bool:
     """Leave an open MDS / Check overlay and show the Received MDSs result list."""
     log.info("Going back to results page...")
     close_check_results_dialog(page, any_check_overlay=True)
-    dismiss_modal(page, allow_escape=False)
-    wait_for_glass_pane_clear(page, timeout_ms=4000, allow_escape=False)
+    dismiss_modal(page, allow_escape=False, save_changes="no")
+    wait_for_glass_pane_clear(page, timeout_ms=4000, allow_escape=False, save_changes="no")
     try:
         back_btn = page.locator(f"xpath={INBOX_SEARCH_TAB}")
         if back_btn.count() > 0:
@@ -3703,7 +3872,7 @@ def return_to_inbox_results(page) -> bool:
         wait_networkidle(page, 15000)
         page.wait_for_timeout(1500)
         close_check_results_dialog(page, any_check_overlay=True)
-        dismiss_modal(page, allow_escape=False)
+        dismiss_modal(page, allow_escape=False, save_changes="no")
         if page.locator(f"xpath={INBOX_FIRST_ROW}").count() > 0:
             return True
         if page.locator(f"xpath={XP_ID_FIELD}").count() > 0:

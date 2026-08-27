@@ -61,6 +61,13 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertIn("close_check_results_dialog", text)
         self.assertIn("not clicking Ingredients on a leftover or search page", text)
         self.assertIn("not clicking the disabled Propose confirm", text)
+        self.assertIn("clicking No so the leftover own MDS is discarded", text)
+        self.assertIn("Preferred contact", text)
+        self.assertIn("def contact_option_is_usable", text)
+        self.assertIn("def parse_contact_option_names", text)
+        self.assertIn("allow_fallback", text)
+        self.assertIn("save_changes=\"no\"", text)
+        self.assertIn("save-changes leave-sheet", text)
         self.assertNotIn('page.frame_locator("iframe[src*=\'lookupCompany\']")', text)
         self.assertNotIn("Fallback: using first visible iframe.", text)
         self.assertNotIn('wait_for_selector("table:has-text(\'Message\')"', text)
@@ -219,6 +226,29 @@ class CompanyLookupHelpers(unittest.TestCase):
         self.assertTrue(imds_agent_v2.contact_is_blank(""))
         self.assertTrue(imds_agent_v2.contact_is_blank("Please select"))
         self.assertFalse(imds_agent_v2.contact_is_blank("Qu, Theresa"))
+        self.assertFalse(imds_agent_v2.contact_option_is_usable(""))
+        self.assertFalse(imds_agent_v2.contact_option_is_usable("-"))
+        self.assertFalse(imds_agent_v2.contact_option_is_usable("Please select"))
+        self.assertTrue(imds_agent_v2.contact_option_is_usable("Qu, Theresa"))
+        self.assertTrue(imds_agent_v2.contact_option_is_usable("Liu, Minghui"))
+        dump = (
+            "option-list: [\n"
+            "  '',\n"
+            "  'Beenah, Tan',\n"
+            "  'Joe, Qiao',\n"
+            "  'Liu, Minghui',\n"
+            "  'Qu, Theresa',\n"
+            "]"
+        )
+        self.assertEqual(
+            imds_agent_v2.parse_contact_option_names(dump),
+            ["Beenah, Tan", "Joe, Qiao", "Liu, Minghui", "Qu, Theresa"],
+        )
+        self.assertEqual(imds_agent_v2.preferred_contact_name(""), "Qu, Theresa")
+        self.assertEqual(imds_agent_v2.preferred_contact_name("Liu, Minghui"), "Liu, Minghui")
+        self.assertEqual(imds_agent_v2._save_changes_choice("no"), "no")
+        self.assertEqual(imds_agent_v2._save_changes_choice("yes"), "yes")
+        self.assertEqual(imds_agent_v2._save_changes_choice(None), "yes")
 
     def test_check_errors_blocking_prompt_and_no_js_strip(self):
         check_text = (
