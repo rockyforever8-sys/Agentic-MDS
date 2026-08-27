@@ -27,7 +27,7 @@ streamlit run ppap_agent/demo_animated.py
 
 ## Google Colab
 
-Open [PPAP_Colab_Start_Here.ipynb](https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/cursor/ppap-quality-agent-17d5/PPAP_Colab_Start_Here.ipynb) in Colab, or run:
+Open [PPAP_Colab_Start_Here.ipynb](https://colab.research.google.com/github/rockyforever8-sys/Agentic-PPAP/blob/main/PPAP_Colab_Start_Here.ipynb) in Colab, or run:
 
 ```python
 %run colab_ppap_demo.py
@@ -104,6 +104,16 @@ python -m unittest discover -s tests -v
 - **Human-in-the-loop** — `interrupt_before` on decision node for SQE approval
 - **Real APIs** — replace SQLite with PLM/QMS/ERP connectors
 - **Checkpointing** — LangGraph resume for multi-day supplier back-and-forth
+
+## Publish to GitHub
+
+This project lives on branch `cursor/ppap-quality-agent-17d5` in Agentic-MDS until published to its own repo:
+
+```bash
+# 1. Create empty repo: https://github.com/new?name=Agentic-PPAP
+# 2. Publish:
+bash scripts/publish_to_github.sh
+```
 
 ## License
 

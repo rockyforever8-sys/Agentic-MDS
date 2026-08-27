@@ -24,8 +24,8 @@ ROOT = Path("/content/Agentic-PPAP") if IN_COLAB else Path(__file__).resolve().p
 def setup() -> Path:
     """Clone repo (Colab) and install dependencies."""
     if IN_COLAB and not (ROOT / "ppap_agent").exists():
-        repo = os.environ.get("PPAP_GIT_REPO", "https://github.com/rockyforever8-sys/Agentic-MDS.git")
-        ref = os.environ.get("PPAP_GIT_REF", "cursor/ppap-quality-agent-17d5")
+        repo = os.environ.get("PPAP_GIT_REPO", "https://github.com/rockyforever8-sys/Agentic-PPAP.git")
+        ref = os.environ.get("PPAP_GIT_REF", "main")
         print(f"Cloning {repo} (branch: {ref})...")
         subprocess.check_call(["git", "clone", "--depth", "1", "--branch", ref, repo, str(ROOT)])
 
