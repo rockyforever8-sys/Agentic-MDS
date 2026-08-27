@@ -63,6 +63,8 @@ A slow or large MDS (for example 26 ingredient nodes) no longer stops the 20-row
 
 Preferred contact is **Qu, Theresa**. If that name is missing from Supplier Data, any other real contact in the dropdown is used. After a failed post-Forward row, **Do you want to save your changes?** is answered **No** when returning to search / opening the next MDS so leftover own-MDS IDs cannot mismatch the rest of the run.
 
+Received MDSs search clicks Combined **None** then forces **Browsed** on (Playwright must not skip a stale “already checked” after None). All-status retry uses Combined **All**.
+
 Then click **Run IMDS until complete**. Output: `imds_output/check_summary.xlsx`.""",
             "md-intro",
         ),
