@@ -57,9 +57,9 @@ This notebook runs the **original IMDS agent** (`imds_agent_v2.py`) — same XPa
 | `OTP_SECRET` | Authenticator TOTP seed (not a Gmail app password) |
 | `IMDS_MASTER_KEY` | Optional passphrase for the encrypted Drive vault |
 
-Optional: `NUM_ITERATIONS` (default **10**; a leftover `3` from earlier debug cells is ignored), `RECIPIENT_COMPANY_IDS` (default `9994,293798`).
+Optional: `NUM_ITERATIONS` (default **20**; leftover `3` or `10` from earlier cells is ignored), `RECIPIENT_COMPANY_IDS` (default `9994,293798`).
 
-A slow or large MDS (for example 26 ingredient nodes) no longer stops the 10-row loop. IMDS Check `0 Error(s) / 0 Warning(s)` is recorded as PASS even when the Check overlay is slow to scrape.
+A slow or large MDS (for example 26 ingredient nodes) no longer stops the 20-row loop. IMDS Check `0 Error(s) / 0 Warning(s)` is recorded as PASS even when the Check overlay is slow to scrape.
 
 Then click **Run IMDS until complete**. Output: `imds_output/check_summary.xlsx`.""",
             "md-intro",
@@ -124,8 +124,8 @@ try:
             val = userdata.get(_key)
             if not val:
                 continue
-            # Leftover debug Secret/env of 3 must not pin the live run.
-            if _key == "NUM_ITERATIONS" and val.strip() == "3":
+            # Leftover debug Secret/env of 3 or 10 must not pin the live run.
+            if _key == "NUM_ITERATIONS" and val.strip() in {"3", "10"}:
                 continue
             os.environ[_key] = val
         except Exception:
