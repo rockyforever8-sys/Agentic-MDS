@@ -2,6 +2,21 @@
 
 Internal executive briefing on an internally built agentic workflow for IMDS MDS review and approval.
 
+## PPAP Quality Review Agent (NEW)
+
+LangGraph-powered prototype for automotive SQE PPAP review automation. Demonstrates graph engineering patterns for quality department workflow automation.
+
+```bash
+pip install -r requirements.txt
+python -m ppap_agent seed          # Seed synthetic database
+python -m ppap_agent inbox          # List pending PPAP submissions
+python -m ppap_agent review PPAP-2026-001   # Single review via LangGraph
+python -m ppap_agent batch          # Batch process all (supervisor graph)
+streamlit run ppap_agent/demo.py    # Interactive demo UI
+```
+
+See [ppap_agent/README.md](ppap_agent/README.md) for architecture details, graph topology, and synthetic scenarios.
+
 ## Presentation
 
 - **UI demo video (45s):** [presentations/IMDS_Agentic_Workflow_Demo.mp4](presentations/IMDS_Agentic_Workflow_Demo.mp4)
