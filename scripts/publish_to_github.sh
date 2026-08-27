@@ -15,10 +15,20 @@ BRANCH="${PPAP_BRANCH:-main}"
 echo "Publishing to ${REPO_URL} (branch: ${BRANCH})..."
 
 git remote remove ppap-origin 2>/dev/null || true
-git remote add ppap-origin "${REPO_URL}"
+if [[ -n "${PPAP_GITHUB_TOKEN:-}" ]]; then
+  AUTH_URL="https://${PPAP_GITHUB_TOKEN}@github.com/rockyforever8-sys/Agentic-PPAP.git"
+  git remote add ppap-origin "${AUTH_URL}"
+else
+  git remote add ppap-origin "${REPO_URL}"
+fi
 
 # Push current standalone project as main on the new repo
-git push -u ppap-origin HEAD:"${BRANCH}"
+if [[ -n "${PPAP_GITHUB_TOKEN:-}" ]]; then
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+    git -c credential.helper= push -u ppap-origin HEAD:"${BRANCH}"
+else
+  git push -u ppap-origin HEAD:"${BRANCH}"
+fi
 
 echo ""
 echo "Done! Repository: https://github.com/rockyforever8-sys/Agentic-PPAP"
