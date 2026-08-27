@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Build the 13-slide executive IMDS agentic-workflow briefing."""
+"""Build the C-suite IMDS agentic-workflow briefing (storyboard + 8 beats)."""
 
 from __future__ import annotations
 
+import argparse
+import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 from pptx import Presentation
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
-from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+from pptx.enum.text import PP_ALIGN
 from pptx.util import Emu, Inches, Pt
 
 
@@ -30,11 +35,96 @@ GREEN = RGBColor(0x1F, 0x8A, 0x72)
 BLUE = RGBColor(0x2C, 0x5F, 0x8A)
 LIGHT_GOLD = RGBColor(0xF8, 0xF1, 0xE0)
 LIGHT_TEAL = RGBColor(0xE5, 0xF3, 0xF1)
+LIGHT_RED = RGBColor(0xF8, 0xEB, 0xEB)
 LINE = RGBColor(0xDE, 0xE3, 0xE9)
 
 FONT = "Calibri"
-TOTAL = 13
-OUT = Path(__file__).resolve().parents[1] / "presentations" / "IMDS_Agentic_Workflow.pptx"
+ROOT = Path(__file__).resolve().parents[1]
+OUT = ROOT / "presentations" / "IMDS_Agentic_Workflow.pptx"
+DOCS_PPTX = ROOT / "docs" / "IMDS_Agentic_Workflow.pptx"
+DOCS_PDF = ROOT / "docs" / "IMDS_Agentic_Workflow.pdf"
+SLIDES_DIR = ROOT / "docs" / "slides"
+TOTAL = 12
+
+# Military / ambiguous jargon that must never appear in this deck.
+FORBIDDEN_JARGON = (
+    "air cover",
+    "cover fire",
+    "battlespace",
+    "war room",
+    "kill chain",
+    "kill switch",
+    "kill-switch",
+    "aircover",
+)
+
+# Narrative spine — presenter run sheet. Every content slide follows these beats.
+STORYBOARD = [
+    {
+        "n": "1",
+        "beat": "Executive Opening",
+        "intent": "Title with project name, presenter, and date. Hook first.",
+        "hook": "Fifty MDS land every day. Five thousand sit open. IMDS is a production gate — not a filing cabinet.",
+        "goal": "Capture attention and establish urgency.",
+        "time": "0:00–1:00",
+    },
+    {
+        "n": "2",
+        "beat": "Pain Points",
+        "intent": "Visual of inefficiencies, missed same-day accept, rising launch cost.",
+        "hook": "Inaction is already on the P&L: specialist hours, PPAP delay, OEM scorecard exposure.",
+        "goal": "Make the audience feel the cost of inaction.",
+        "time": "1:00–4:00",
+    },
+    {
+        "n": "3",
+        "beat": "Proposed Solution",
+        "intent": "Diagram: ingest received MDS → orchestrate Check → PASS/FAIL output.",
+        "hook": "The live agent already runs our IMDS account: PASS accept-forward-propose; FAIL reject.",
+        "goal": "Position AI as a strategic enabler, not just a technical tool.",
+        "time": "4:00–8:00",
+    },
+    {
+        "n": "4",
+        "beat": "Business Impact",
+        "intent": "Before/after: manual inbox versus the agentic workflow.",
+        "hook": "Hours return to specialists. MDS stop stalling PPAP. Decisions are logged.",
+        "goal": "Show tangible transformation.",
+        "time": "8:00–10:30",
+    },
+    {
+        "n": "5",
+        "beat": "Budget & ROI",
+        "intent": "Implementation, training, maintenance. Payback window.",
+        "hook": "Internal effort, not a software RFP. Pilot hours pay back inside one quarter.",
+        "goal": "Demonstrate financial viability and risk mitigation.",
+        "time": "10:30–13:30",
+    },
+    {
+        "n": "6",
+        "beat": "Implementation Roadmap",
+        "intent": "Timeline: Pilot → Scale → Optimize, with governance.",
+        "hook": "Controlled rollout: 20 MDS, logged decisions, executive sponsorship, emergency halt.",
+        "goal": "Build confidence in execution.",
+        "time": "13:30–15:30",
+    },
+    {
+        "n": "7",
+        "beat": "Case Studies",
+        "intent": "External automotive / agentic-automation proof, labeled illustrative.",
+        "hook": "Peers already automated IMDS-class work. We keep OEM knowledge in-house.",
+        "goal": "Provide credibility and reduce perceived risk.",
+        "time": "15:30–17:30",
+    },
+    {
+        "n": "8",
+        "beat": "Call to Action",
+        "intent": "Bold line: Invest in Agentic AI Today. Specific ask.",
+        "hook": "Approve the 20-MDS pilot and the internal budget line this week.",
+        "goal": "Drive decision and secure buy-in.",
+        "time": "17:30–20:00",
+    },
+]
 
 
 def _set_run(run, text, size, color, bold=False, italic=False):
@@ -135,7 +225,7 @@ def footer(slide, n):
         Inches(7.30),
         Inches(9.8),
         Inches(0.18),
-        [("INTERNAL CONFIDENTIAL  ·  Supplier Quality  ·  Agentic MDS briefing  ·  August 2026", 9, RGBColor(0x8A, 0x96, 0xA4), False)],
+        [("INTERNAL CONFIDENTIAL  ·  Johnson Electric  ·  Supplier Quality  ·  27 August 2026", 9, RGBColor(0x8A, 0x96, 0xA4), False)],
     )
     add_text(
         slide,
@@ -190,23 +280,56 @@ def set_cell(cell, text, size=11, color=DARK, bold=False, fill=None, align=PP_AL
         _set_run(r, text, size, color, bold)
 
 
+def _speech_goal(beat_n: str, extra: str) -> str:
+    row = next(b for b in STORYBOARD if b["n"] == beat_n)
+    return (
+        f"BEAT {row['n']} · {row['beat']}  ({row['time']})\n"
+        f"SLIDE INTENT: {row['intent']}\n"
+        f"SPOKEN HOOK: {row['hook']}\n"
+        f"GOAL: {row['goal']}\n\n"
+        f"{extra}"
+    )
+
+
 # --- Slides ----------------------------------------------------------------
 def s01_title(prs):
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     rect(sl, 0, 0, W, H, NAVY)
     rect(sl, 0, 0, Inches(0.18), H, GOLD)
     rect(sl, Inches(0.18), 0, Inches(0.08), H, TEAL)
-    add_text(sl, Inches(0.7), Inches(0.55), Inches(12), Inches(0.28), [("INTERNAL CONFIDENTIAL  ·  20-MINUTE DECISION BRIEFING  ·  AUGUST 2026", 11, GOLD, True)])
-    add_text(sl, Inches(0.7), Inches(1.15), Inches(12.1), Inches(1.35), [("Own the IMDS desk.\nBuild the agentic workflow.", 34, WHITE, True)])
     add_text(
         sl,
         Inches(0.7),
-        Inches(2.70),
-        Inches(11.8),
+        Inches(0.42),
+        Inches(12),
+        Inches(0.28),
+        [("INTERNAL CONFIDENTIAL  ·  C-SUITE DECISION BRIEFING  ·  27 AUGUST 2026", 11, GOLD, True)],
+    )
+    add_text(
+        sl,
         Inches(0.7),
+        Inches(0.95),
+        Inches(12.1),
+        Inches(0.42),
+        [("IMDS AGENTIC WORKFLOW", 14, GOLD, True)],
+    )
+    add_text(
+        sl,
+        Inches(0.7),
+        Inches(1.35),
+        Inches(12.1),
+        Inches(1.15),
+        [("Own the IMDS desk.\nSame-day accept. Zero PPAP delay.", 32, WHITE, True)],
+    )
+    add_text(
+        sl,
+        Inches(0.7),
+        Inches(2.65),
+        Inches(11.9),
+        Inches(0.85),
         [
             (
-                "From a 5,000-MDS backlog and OEM-specific rejects (GM, VW, Ford) to same-day accept and zero PPAP delay — with an internally built auto-accept / auto-reject workflow. No software budget.",
+                "50 MDS land in our inbox every working day. ~5,000 sit open — about 100 days of intake if nothing new arrived. Every one is a production-authorization document, not paperwork.",
                 16,
                 RGBColor(0xC5, 0xD0, 0xDC),
                 False,
@@ -214,27 +337,27 @@ def s01_title(prs):
         ],
     )
     meta = [
-        ("Presented by", "Supplier Quality Director"),
-        ("Audience", "VP / GM  ·  Operations, Supply Chain, Quality, HR"),
-        ("Our role", "Tier-1 and Tier-2 supplier"),
-        ("Customers in scope", "GM  ·  VW  ·  Ford"),
+        ("Presented by", "Wong  ·  Kam Yuen Wong\nSupplier Quality Director / Data Scientist"),
+        ("Company", "Johnson Electric\nInternational Limited"),
+        ("Audience", "C-suite  ·  VP / GM\nOps, Supply Chain, Quality, Finance"),
+        ("Today’s date", "Thursday\n27 August 2026"),
     ]
     x = Inches(0.7)
     for a, b in meta:
-        card(sl, x, Inches(3.70), Inches(2.95), Inches(1.35), NAVY_MID, None)
-        add_text(sl, x + Inches(0.14), Inches(3.82), Inches(2.67), Inches(0.28), [(a.upper(), 10, GOLD, True)])
-        add_text(sl, x + Inches(0.14), Inches(4.14), Inches(2.67), Inches(0.72), [(b, 13, WHITE, False)])
+        card(sl, x, Inches(3.65), Inches(2.95), Inches(1.55), NAVY_MID, None)
+        add_text(sl, x + Inches(0.14), Inches(3.74), Inches(2.67), Inches(0.24), [(a.upper(), 10, GOLD, True)])
+        add_text(sl, x + Inches(0.14), Inches(4.02), Inches(2.67), Inches(1.05), [(b, 13, WHITE, False)])
         x += Inches(3.1)
-    add_text(sl, Inches(0.7), Inches(5.35), Inches(12), Inches(0.35), [("TODAY’S ASK", 11, GOLD, True)])
+    add_text(sl, Inches(0.7), Inches(5.40), Inches(12), Inches(0.28), [("TODAY’S ASK", 11, GOLD, True)])
     add_text(
         sl,
         Inches(0.7),
-        Inches(5.65),
+        Inches(5.70),
         Inches(12),
-        Inches(0.9),
+        Inches(1.15),
         [
             (
-                "Endorse Supplier Quality as accountable owner of an internally led build. Give air cover to automate our own IMDS company account. Recognize this as the house approach to a production-gate problem hiring cannot solve.",
+                "Invest in Agentic AI Today. Approve the 20-MDS live pilot and the internal budget line (implementation, training, maintenance). Name Supplier Quality as accountable owner, with executive sponsorship and a governance halt.",
                 15,
                 WHITE,
                 False,
@@ -243,187 +366,28 @@ def s01_title(prs):
     )
     notes(
         sl,
-        "0:00–0:45. Do not walk the agenda. Read the ask once. Names in the room: Operations cares about PPAP, Supply Chain about the 5,000 open and supplier chase, Quality about wrongful-accept, HR about specialist scarcity — not headcount cut. You are Supplier Quality Director. This is a decision briefing, not a training class.",
+        _speech_goal(
+            "1",
+            "Do not walk a long agenda. Read the statistic once, then the ask once. Names in the room: Operations cares about PPAP, Supply Chain about the 5,000 open, Quality about wrongful-accept, Finance about payback. You are Wong, Supplier Quality Director / data scientist at Johnson Electric International Limited. This is a decision briefing, not a training class. After the title, the storyboard is the 60-second map of the next 20 minutes.",
+        ),
     )
 
 
-def s02_situation(prs):
+def s02_storyboard_a(prs):
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     rect(sl, 0, 0, W, H, WHITE)
     header(
         sl,
-        "01  ·  The operating picture",
-        "The IMDS desk is a production gate run as a manual inbox",
-        "Facts as of this briefing. No Examiner, no IMDS Plus, no Connect, no third-party platform.",
+        "Storyboard  ·  presenter run sheet",
+        "Eight beats. This is how we run the room.",
+        "Use as a 60-second agenda, or skip and jump to Pain Points. Spoken hooks are on every notes page.",
     )
-    kpis = [
-        ("50", "MDS received / day", "Inbound volume that must be viewed before any accept or reject"),
-        ("~5,000", "Open outstanding MDS", "Structural backlog — ~100 working days of intake if inbound froze"),
-        ("0", "Automation in place", "Classic IMDS browser only. Every node is a human click."),
-        ("GM / VW / Ford", "Reject chaos driver", "OEM overlays on top of Rec 001 — not the IMDS system check"),
-    ]
-    x = Inches(0.5)
-    for v, lab, sub in kpis:
-        kpi(sl, x, Inches(1.50), Inches(3.0), Inches(1.55), v, lab, sub)
-        x += Inches(3.15)
-
-    pains = [
-        ("Operations", "An accepted MDS is a PPAP prerequisite. Open MDS = open production authorization. Zero PPAP delay is the target, not a slogan."),
-        ("Supply chain", "We sit in two hops at once: Tier-2 to our customer and Tier-1 to the OEM. Dummy or unaccepted child MDS blocks the whole tree."),
-        ("Quality", "Passing IMDS Check is not OEM acceptance. IMDS 15.2 says further manual review may be required. GM, VW, and Ford each add naming, weight, and structure rules."),
-        ("HR", "Judgment sits in a few specialists’ heads. Leave or peak volume stalls launches. The answer is to encode OEM rule packs — not to hire a parallel inbox."),
-    ]
-    y = Inches(3.25)
-    x = Inches(0.5)
-    for t, b in pains:
-        card(sl, x, y, Inches(3.0), Inches(3.10), WHITE, LINE)
-        rect(sl, x, y, Inches(3.0), Inches(0.42), TEAL if t != "HR" else COPPER)
-        add_text(sl, x + Inches(0.14), y + Inches(0.08), Inches(2.72), Inches(0.28), [(t, 13, WHITE, True)])
-        add_text(sl, x + Inches(0.14), y + Inches(0.55), Inches(2.72), Inches(2.4), [(b, 12, SLATE, False)])
-        x += Inches(3.15)
-    footer(sl, 2)
-    notes(
-        sl,
-        "0:45–2:15. Four numbers, then one sentence per function. Do not debate the 5,000 — it is the reason we are here. If challenged on automation=0, confirm: no IMDS-a2/Plus, no Examiner, no Connect. HR box: say explicitly this is not a reduction program.",
-    )
-
-
-def s03_imds(prs):
-    sl = prs.slides.add_slide(prs.slide_layouts[6])
-    rect(sl, 0, 0, W, H, WHITE)
-    header(sl, "02  ·  Introduction of IMDS", "IMDS is the industry mechanism behind ELV, GADSL, and PPAP")
-    left = [
-        "IMDS (International Material Data System) is the OEM-mandated repository for every material in a finished vehicle. DXC administers it. Basic browser access is free; we use only that today.",
-        "An MDS is a tree: component / semi-component → material → basic substance (CAS, 1 g resolution). Every node must sum to 100%. Rec 001 is the structure and quality bible (10% wildcard cap, legal node types, polymer marking, application codes).",
-        "IMDS was built for the ELV Directive. It also carries GADSL (P / D / D/P), REACH SVHC, and, since IMDS 15, PCF fields (Rec 027). We are not asking for PCF in v1.",
-        "Most OEMs will not grant PPAP without an accepted MDS for that part number. A rejected MDS is a launch delay.",
-    ]
-    card(sl, Inches(0.5), Inches(1.15), Inches(7.35), Inches(5.70), WHITE, LINE)
-    add_text(sl, Inches(0.72), Inches(1.32), Inches(6.95), Inches(0.32), [("What the room must share as language", 15, NAVY, True)])
-    add_bullets(sl, Inches(0.72), Inches(1.75), Inches(6.9), Inches(4.85), left, 13, SLATE, 8)
-
-    hops = [
-        ("Material / Tier-3", "Propose child MDS to us"),
-        ("Us as customer", "View → accept or reject. Only accepted children may be attached."),
-        ("Us as supplier", "Build our tree. Propose or Send to next customer."),
-        ("GM / VW / Ford", "Accept into the vehicle. ELV / GADSL / PPAP."),
-    ]
-    y = Inches(1.15)
-    for t, b in hops:
-        card(sl, Inches(8.10), y, Inches(4.70), Inches(1.32), OFF, LINE)
-        add_text(sl, Inches(8.28), y + Inches(0.14), Inches(4.35), Inches(0.32), [(t, 13, TEAL, True)])
-        add_text(sl, Inches(8.28), y + Inches(0.50), Inches(4.35), Inches(0.68), [(b, 12, SLATE, False)])
-        y += Inches(1.42)
-    footer(sl, 3)
-    notes(
-        sl,
-        "2:15–3:45. Stay technical but short. Rec 001, GADSL, accept-before-attach, PPAP. Dual hop is why one person lives in both inbox and outbox. Do not teach the full IMDS UI.",
-    )
-
-
-def s04_roles(prs):
-    sl = prs.slides.add_slide(prs.slide_layouts[6])
-    rect(sl, 0, 0, W, H, WHITE)
-    header(sl, "03  ·  Supplier roles", "Every MDS we touch is one of six actions — all of them are chaotic today")
-    actions = [
-        ("1", "Verify inbox", "Filter received: not yet browsed, browsed, in process, cancelled by sender. 50/day plus 5,000 open."),
-        ("2", "View / analyse", "Mandatory before accept or reject. Walk the tree vs BOM/drawing. Rec 001 + OEM overlay."),
-        ("3", "Accept", "Irreversible in the browser. Then the child can be attached to our MDS."),
-        ("4", "Reject", "Requires a usable reason. Vague Rec 001 text creates another bad version."),
-        ("5", "Forward", "Only after accept, and only if the creator allowed forwarding. Directed-buy pattern."),
-        ("6", "Propose / Send", "Hand our assembled MDS to the next customer. Version rules differ — get this wrong and GM/VW/Ford bounce it."),
-    ]
-    y = Inches(1.15)
-    for i, (n, t, b) in enumerate(actions):
-        col = i % 3
-        row = i // 3
-        x = Inches(0.5) + Inches(4.2) * col
-        yy = y + Inches(2.80) * row
-        card(sl, x, yy, Inches(4.0), Inches(2.62), WHITE, LINE)
-        oval(sl, x + Inches(0.18), yy + Inches(0.18), Inches(0.38), Inches(0.38), TEAL if i < 4 else COPPER)
-        add_text(sl, x + Inches(0.18), yy + Inches(0.22), Inches(0.38), Inches(0.32), [(n, 13, WHITE, True, PP_ALIGN.CENTER)])
-        add_text(sl, x + Inches(0.68), yy + Inches(0.22), Inches(3.1), Inches(0.32), [(t, 15, NAVY, True)])
-        add_text(sl, x + Inches(0.18), yy + Inches(0.72), Inches(3.64), Inches(1.7), [(b, 13, SLATE, False)])
-    footer(sl, 4)
-    notes(
-        sl,
-        "3:45–5:15. This is the process Quality already lives. Stress action 6: Propose vs Send. Ford/GM/VW guidelines differ; a Send when Propose is required is an instant reject. That is an auto-reject pattern in v1.",
-    )
-
-
-def s05_oem(prs):
-    sl = prs.slides.add_slide(prs.slide_layouts[6])
-    rect(sl, 0, 0, W, H, WHITE)
-    header(
-        sl,
-        "03  ·  Supplier roles",
-        "Rec 001 is the floor. GM, VW, and Ford are why first-pass yield dies.",
-        "This is the failure mode. Not typing speed. Not “the IMDS check turned green.”",
-    )
-    rows = [
-        ["Layer", "What it checks", "If we only do this", "What the OEM still rejects"],
-        ["IMDS Check", "Completeness, some Rec 001 arithmetic", "Necessary", "IMDS 15.2: further review may be required"],
-        ["Rec 001", "Tree legality, 100% nodes, 10% wildcard, ranges, names", "Industry baseline", "Material class, polymer marking, application codes still judged"],
-        ["GM overlay", "GM IMDS reporting + GMW3059 substance rules", "GM-specific", "Part naming, weight window, org unit, published-MDS policy"],
-        ["VW overlay", "VW 91101 and Konzern IMDS instructions", "VW-specific", "Structure/sibling rules, recipient data, plant org ID"],
-        ["Ford overlay", "Ford RSMS + IMDS reporting guide", "Ford-specific", "Supplier code / part number pairing, legacy flags, Propose vs Send"],
-    ]
-    table_shape = sl.shapes.add_table(len(rows), 4, Inches(0.45), Inches(1.45), Inches(12.4), Inches(4.55))
+    rows = [["#", "Beat", "Slide intent", "Spoken hook", "Goal"]]
+    for b in STORYBOARD[:4]:
+        rows.append([b["n"], b["beat"], b["intent"], b["hook"], b["goal"]])
+    table_shape = sl.shapes.add_table(len(rows), 5, Inches(0.40), Inches(1.42), Inches(12.50), Inches(5.45))
     table = table_shape.table
-    widths = [2.0, 4.15, 2.35, 3.9]
-    for i, w in enumerate(widths):
-        table.columns[i].width = Inches(w)
-    for r, row in enumerate(rows):
-        for c, val in enumerate(row):
-            cell = table.cell(r, c)
-            if r == 0:
-                set_cell(cell, val, 12, WHITE, True, NAVY, PP_ALIGN.CENTER)
-            elif c == 0:
-                set_cell(cell, val, 12, NAVY, True, LIGHT_GOLD if r % 2 else OFF)
-            else:
-                set_cell(cell, val, 11, SLATE, False, WHITE if r % 2 else OFF)
-    add_text(
-        sl,
-        Inches(0.5),
-        Inches(6.15),
-        Inches(12.3),
-        Inches(0.85),
-        [
-            (
-                "v1 IP is three Examiner-equivalent packs: GM, VW, Ford — applied on inbound accept/reject and on outbound Propose. That is how we get to 100% first-pass toward the OEM. One generic Rec 001 bot will not.",
-                14,
-                NAVY,
-                True,
-            )
-        ],
-    )
-    footer(sl, 5)
-    notes(
-        sl,
-        "5:15–7:00. This is the most important content slide. If you run long, skip later market color, not this. Quality will nod. Ops needs to hear that OEM reject restarts PPAP. Name GMW3059, VW 91101, Ford RSMS so you sound like the desk, not a software pitch.",
-    )
-
-
-def s06_time(prs):
-    sl = prs.slides.add_slide(prs.slide_layouts[6])
-    rect(sl, 0, 0, W, H, WHITE)
-    header(sl, "04  ·  Daily time and backlog", "Hiring cannot drain 5,000. The math does not allow it.")
-    # three big numbers
-    kpi(sl, Inches(0.5), Inches(1.18), Inches(4.0), Inches(1.85), "50 / day", "New MDS into the inbox", "Must be viewed before accept or reject")
-    kpi(sl, Inches(4.65), Inches(1.18), Inches(4.0), Inches(1.85), "5,000 open", "Outstanding stock", "Equals ~100 days of intake if inbound stopped")
-    kpi(sl, Inches(8.80), Inches(1.18), Inches(4.0), Inches(1.85), "~106 / day", "Decisions needed to drain in 90 days", "50 new + 5,000/90. Agents, not overtime.")
-
-    rows = [
-        ["Action", "Time per MDS (typical)", "At 50 new / day", "What breaks at 5,000 open"],
-        ["Inbox verify", "1–2 min", "45–90 min", "Aging, VIP OEM parts, cancelled-by-sender noise"],
-        ["View + Rec 001 + OEM pack", "8–20 min simple; 30–60 complex", "Most of the shift", "This is the bottleneck. Nodes, not MDS count."],
-        ["Accept", "1–3 min after review", "Cheap", "Irreversible. Wrongful accept is the Quality risk."],
-        ["Reject + usable reason", "5–15 min", "High if OEM rules fire", "Reason quality determines whether version N+1 is clean."],
-        ["Forward / Propose / Send", "2–5 min + 20–90 min assemble", "Outbound to GM/VW/Ford", "Recipient data and version policy. Instant OEM bounce if wrong."],
-    ]
-    table_shape = sl.shapes.add_table(len(rows), 4, Inches(0.45), Inches(3.20), Inches(12.4), Inches(3.55))
-    table = table_shape.table
-    widths = [2.7, 3.2, 2.5, 4.0]
+    widths = [0.55, 2.05, 3.15, 3.85, 2.90]
     for i, w in enumerate(widths):
         table.columns[i].width = Inches(w)
     for r, row in enumerate(rows):
@@ -432,182 +396,277 @@ def s06_time(prs):
             if r == 0:
                 set_cell(cell, val, 11, WHITE, True, NAVY, PP_ALIGN.CENTER)
             elif c == 0:
-                set_cell(cell, val, 11, NAVY, True, LIGHT_TEAL if r % 2 else OFF)
+                set_cell(cell, val, 14, WHITE, True, TEAL, PP_ALIGN.CENTER)
+            elif c == 1:
+                set_cell(cell, val, 12, NAVY, True, LIGHT_GOLD if r % 2 else OFF)
             else:
                 set_cell(cell, val, 11, SLATE, False, WHITE if r % 2 else OFF)
+    footer(sl, 2)
+    notes(
+        sl,
+        "STORYBOARD (beats 1–4). This slide is mandatory so a presenter can run the room. If the VP is already leaning in, spend 20 seconds: “Eight beats — pain, solution, impact, money, roadmap, proof, ask.” Then go. Do not teach IMDS UI here. Goal of the storyboard: keep you on the C-suite spine (ROI, risk, competitiveness, governance) and off engineering detail.",
+    )
+
+
+def s03_storyboard_b(prs):
+    sl = prs.slides.add_slide(prs.slide_layouts[6])
+    rect(sl, 0, 0, W, H, WHITE)
+    header(
+        sl,
+        "Storyboard  ·  presenter run sheet",
+        "Beats 5–8: money, rollout, proof, the ask.",
+        "Close on “Invest in Agentic AI Today” plus a specific pilot / budget approval — not a vague endorsement.",
+    )
+    rows = [["#", "Beat", "Slide intent", "Spoken hook", "Goal"]]
+    for b in STORYBOARD[4:]:
+        rows.append([b["n"], b["beat"], b["intent"], b["hook"], b["goal"]])
+    table_shape = sl.shapes.add_table(len(rows), 5, Inches(0.40), Inches(1.42), Inches(12.50), Inches(5.45))
+    table = table_shape.table
+    widths = [0.55, 2.05, 3.15, 3.85, 2.90]
+    for i, w in enumerate(widths):
+        table.columns[i].width = Inches(w)
+    for r, row in enumerate(rows):
+        for c, val in enumerate(row):
+            cell = table.cell(r, c)
+            if r == 0:
+                set_cell(cell, val, 11, WHITE, True, NAVY, PP_ALIGN.CENTER)
+            elif c == 0:
+                set_cell(cell, val, 14, WHITE, True, COPPER, PP_ALIGN.CENTER)
+            elif c == 1:
+                set_cell(cell, val, 12, NAVY, True, LIGHT_GOLD if r % 2 else OFF)
+            else:
+                set_cell(cell, val, 11, SLATE, False, WHITE if r % 2 else OFF)
+    footer(sl, 3)
+    notes(
+        sl,
+        "STORYBOARD (beats 5–8). Timing target is 20 minutes including questions. Budget is internal-program hours, not a software RFP. Case studies are external / illustrative — say that out loud. CTA: “Invest in Agentic AI Today” and the 20-MDS pilot plus budget line. Executive sponsorship and stakeholder alignment — never military language.",
+    )
+
+
+def s04_pain(prs):
+    sl = prs.slides.add_slide(prs.slide_layouts[6])
+    rect(sl, 0, 0, W, H, WHITE)
+    header(
+        sl,
+        "02  ·  Pain points",
+        "The IMDS desk is a production gate run as a manual inbox",
+        "Frame this as ROI, launch risk, and competitiveness — not typing speed.",
+    )
+    kpis = [
+        ("50", "MDS received / day", "Must be viewed before any accept or reject"),
+        ("~5,000", "Open outstanding MDS", "~100 working days of intake if inbound froze"),
+        ("8–60 min", "Per MDS, by hand", "Rec 001 + GM / VW / Ford overlays, node by node"),
+        ("PPAP wait", "Cost of inaction", "Unaccepted MDS = open production authorization"),
+    ]
+    x = Inches(0.5)
+    for v, lab, sub in kpis:
+        kpi(sl, x, Inches(1.42), Inches(3.0), Inches(1.50), v, lab, sub, NAVY if v != "PPAP wait" else COPPER)
+        x += Inches(3.15)
+
+    pains = [
+        ("ROI", "Specialist hours are spent on clicks — Check, accept, forward, propose, reject — not on supplier coaching or OEM-rule ownership. Hiring a parallel inbox does not encode three OEM rule packs."),
+        ("Risk", "Passing IMDS Check is not OEM acceptance. IMDS 15.2 says further review may be required. Wrongful accept is a Quality event. A bouncing MDS to GM, VW, or Ford restarts PPAP."),
+        ("Competitiveness", "We sit in two hops: Tier-2 to our customer and Tier-1 to the OEM. Dummy or unaccepted child MDS blocks the tree. Scorecards and launch dates do not wait for a 5,000-row backlog."),
+        ("Capability", "Judgment sits in a few specialists’ heads. Leave or peak volume stalls launches. The scarce asset is the rule pack — not more people doing the same inbox."),
+    ]
+    y = Inches(3.12)
+    x = Inches(0.5)
+    colors = [TEAL, RED, COPPER, BLUE]
+    for (t, b), col in zip(pains, colors):
+        card(sl, x, y, Inches(3.0), Inches(3.85), WHITE, LINE)
+        rect(sl, x, y, Inches(3.0), Inches(0.42), col)
+        add_text(sl, x + Inches(0.14), y + Inches(0.08), Inches(2.72), Inches(0.28), [(t, 13, WHITE, True)])
+        add_text(sl, x + Inches(0.14), y + Inches(0.55), Inches(2.72), Inches(3.15), [(b, 12, SLATE, False)])
+        x += Inches(3.15)
+    footer(sl, 4)
+    notes(
+        sl,
+        _speech_goal(
+            "2",
+            "Four numbers, then one sentence per executive priority. Do not debate the 5,000 — it is why we are here. If challenged on “we already have IMDS,” confirm: classic browser only; no IMDS Plus, no Examiner, no Connect. HR in the room: this is not a reduction program. Quality: Rec 001 is the floor; GM / VW / Ford overlays are why first-pass dies. Operations: zero PPAP delay is the target, not a slogan.",
+        ),
+    )
+
+
+def s05_solution(prs):
+    sl = prs.slides.add_slide(prs.slide_layouts[6])
+    rect(sl, 0, 0, W, H, WHITE)
+    header(
+        sl,
+        "03  ·  Proposed solution",
+        "Agentic workflow: ingest → orchestrate → output",
+        "A live inbox agent on our company IMDS account — not a nightly spreadsheet, not a vendor platform.",
+    )
+    stages = [
+        (NAVY, "1  INGEST", "Received MDS rows from our IMDS inbox. Default batch: 20. One-button Colab run. Secrets stay in Colab (key icon): IMDS_USERNAME, IMDS_PASSWORD, OTP_SECRET."),
+        (TEAL, "2  ORCHESTRATE", "Open each row. Run IMDS Check. Network-resume if the session drops. Leftover own-MDS sheets are closed cleanly so IDs never mismatch the next row."),
+        (GREEN, "3  OUTPUT", "PASS → accept + forward + propose to recipients 9994 and 293798. FAIL → reject. Preferred contact Qu, Theresa; any real Supplier Data contact if she is missing."),
+    ]
+    x = Inches(0.45)
+    for i, (color, title, body) in enumerate(stages):
+        card(sl, x, Inches(1.38), Inches(3.85), Inches(3.35), WHITE, LINE)
+        rect(sl, x, Inches(1.38), Inches(3.85), Inches(0.50), color)
+        add_text(sl, x + Inches(0.16), Inches(1.46), Inches(3.53), Inches(0.36), [(title, 14, WHITE, True)])
+        add_text(sl, x + Inches(0.16), Inches(2.02), Inches(3.53), Inches(2.50), [(body, 13, SLATE, False)])
+        if i < 2:
+            chevron(sl, x + Inches(3.78), Inches(2.85), Inches(0.28), Inches(0.36), GOLD)
+        x += Inches(4.15)
+
+    fork = [
+        (GREEN, "PASS", "Accept the received MDS. Forward. Propose to company IDs 9994 and 293798. Contact: Qu, Theresa, with fallback to any real name in the dropdown."),
+        (RED, "FAIL", "Reject with the Check result on the record. Do not forward. Do not propose. The specialist is not stuck in a click loop on a known-bad tree."),
+    ]
+    x = Inches(0.45)
+    for color, title, body in fork:
+        card(sl, x, Inches(4.90), Inches(6.15), Inches(2.05), WHITE, LINE)
+        rect(sl, x, Inches(4.90), Inches(0.12), Inches(2.05), color)
+        add_text(sl, x + Inches(0.28), Inches(5.05), Inches(2.2), Inches(0.32), [(title, 16, color, True)])
+        add_text(sl, x + Inches(2.40), Inches(5.08), Inches(3.55), Inches(1.70), [(body, 13, SLATE, False)])
+        x += Inches(6.30)
+    footer(sl, 5)
+    notes(
+        sl,
+        _speech_goal(
+            "3",
+            "Walk left to right: ingest, orchestrate, output. Then the fork. Measurable outcomes: a 20-MDS batch decided the same session; PASS rows land at 9994 and 293798; FAIL rows are rejected, not left aging. Position this as a strategic production-gate control, not “we wrote a script.” If asked about credentials: Colab Secrets only — never in git. If asked about contact: Theresa is preferred; any real Supplier Data contact is allowed so a missing name does not stall Propose.",
+        ),
+    )
+
+
+def s06_live_agent(prs):
+    sl = prs.slides.add_slide(prs.slide_layouts[6])
+    rect(sl, 0, 0, W, H, WHITE)
+    header(
+        sl,
+        "03  ·  Proposed solution",
+        "The live agent is already hardened for a governed pilot",
+        "imds_agent_v2.py on our licensed IMDS users only. Reliability is the governance story.",
+    )
+    items = [
+        ("One-button Colab", "Run from Colab_Start_Here. Credentials in Colab Secrets (key icon). Default 20 MDS. Leftover debug values of 3 or 10 are ignored so an old cell cannot shrink the pilot."),
+        ("PASS path", "IMDS Check with 0 errors → accept, then forward, then propose. Recipients 9994 and 293798. Preferred contact Qu, Theresa."),
+        ("FAIL path", "Check failures are rejected. The inbox does not accumulate known-bad MDS while specialists hunt clicks."),
+        ("Network resume", "A dropped session waits and continues the 20-row loop instead of aborting the batch. Production gates cannot depend on a perfect network afternoon."),
+        ("Same-MDS tabs", "“Do you want to save your changes?” is Yes when switching Supplier Data / Recipient Data on the same forwarded MDS so Propose finishes on the new own-MDS ID."),
+        ("Leaving leftovers", "The same prompt is No when leaving a leftover own-MDS sheet to search the next received row — Yes would keep the leftover ID and mismatch every later row."),
+    ]
+    y = Inches(1.32)
+    x0 = Inches(0.5)
+    for i, (t, b) in enumerate(items):
+        col = i % 2
+        row = i // 2
+        x = x0 + Inches(6.35) * col
+        yy = y + Inches(1.82) * row
+        card(sl, x, yy, Inches(6.15), Inches(1.68), WHITE, LINE)
+        oval(sl, x + Inches(0.16), yy + Inches(0.18), Inches(0.36), Inches(0.36), TEAL)
+        add_text(sl, x + Inches(0.16), yy + Inches(0.22), Inches(0.36), Inches(0.30), [(str(i + 1), 12, WHITE, True, PP_ALIGN.CENTER)])
+        add_text(sl, x + Inches(0.64), yy + Inches(0.18), Inches(5.30), Inches(0.32), [(t, 15, NAVY, True)])
+        add_text(sl, x + Inches(0.64), yy + Inches(0.54), Inches(5.30), Inches(1.00), [(b, 12, SLATE, False)])
     footer(sl, 6)
     notes(
         sl,
-        "7:00–8:30. Ops and HR slide. 106/day is the only number that matters for the 90-day drain. Do not claim same-day on the 5,000 stock on day 1. Same-day is the target for NEW requests once auto-accept is live. HR: more FTEs still cannot encode three OEM rulebooks consistently.",
+        _speech_goal(
+            "3",
+            "This is still Beat 3. C-suite translation: the agent is not a lab toy. Network resume, leftover-sheet handling, and the save-changes rule are how we keep a 20-row pilot from corrupting IDs. Own-account only — our credentials, our inbox. No other company’s IMDS data. Emergency halt (governance halt) is the control if Quality wants auto-accept paused. Do not open a DXC commercial discussion unless asked.",
+        ),
     )
 
 
-def s07_agentic(prs):
+def s07_impact(prs):
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     rect(sl, 0, 0, W, H, WHITE)
     header(
         sl,
-        "05  ·  Agentic workflow",
-        "v1 decides: auto-accept greens, auto-reject reds, humans on novel cases",
-        "An agent pursues a goal — same-day inbox to a defined quality bar — with tools, memory, and a kill switch. Not a nightly spreadsheet.",
+        "04  ·  Business impact",
+        "Manual inbox versus the agentic workflow",
+        "Transformation is hours, launch risk, and a decision log — not a software logo.",
     )
-    cols = [
-        (GREEN, "GREEN  ·  auto-accept", [
-            "Rec 001 arithmetic clean",
-            "No IMDS Check errors",
-            "Matching GM or VW or Ford pack",
-            "Known-good supplier / material IDs",
-            "Weight inside the OEM window",
-            "Logged with rule-pack version",
-        ]),
-        (RED, "RED  ·  auto-reject", [
-            "GADSL P / illegal heavy-metal code",
-            "Dummy or unaccepted child node",
-            "Illegal tree / mixed siblings where OEM forbids",
-            "Send used where Propose is required",
-            "Part number / supplier code mismatch",
-            "Structured reject text, node-cited",
-        ]),
-        (GOLD, "HUMAN  ·  do not automate", [
-            "New chemistry / classification call",
-            "OEM derogation or dispute",
-            "Conflicting measured vs calculated weight near limit",
-            "Directed-buy / forwarding edge cases",
-            "Policy change (new GADSL / Rec)",
-            "Kill-switch and sample audit of greens",
-        ]),
+    rows = [
+        ["Work", "Before — manual desk", "After — agentic workflow"],
+        ["Inbox", "50/day viewed by hand; ~5,000 aging", "20-MDS governed batch; same-session decisions"],
+        ["Check", "Specialist walks every node, every overlay", "Agent runs IMDS Check; PASS/FAIL is explicit"],
+        ["PASS path", "Accept, forward, propose as separate click chains", "Accept + forward + propose to 9994 and 293798"],
+        ["FAIL path", "Rejects wait; reasons vary by who is on shift", "Reject on Check failure; reason on the record"],
+        ["Contact / recipients", "Theresa / org IDs re-typed; easy to miss", "Preferred contact with fallback; both recipients every PASS"],
+        ["Disruption", "Network drop or leftover sheet aborts the afternoon", "Resume after drop; leftover sheets closed with No"],
+        ["PPAP / scorecard", "Open MDS = open launch authorization", "Same-day greens; reds returned to the supplier the same day"],
+        ["Audit trail", "Tribal knowledge in specialists’ heads", "Excel check_summary with Action Result per row"],
     ]
-    x = Inches(0.5)
-    for color, title, items in cols:
-        card(sl, x, Inches(1.50), Inches(4.0), Inches(5.35), WHITE, LINE)
-        rect(sl, x, Inches(1.50), Inches(4.0), Inches(0.55), color)
-        tc = NAVY if color == GOLD else WHITE
-        add_text(sl, x + Inches(0.18), Inches(1.60), Inches(3.64), Inches(0.38), [(title, 14, tc, True)])
-        add_bullets(sl, x + Inches(0.18), Inches(2.20), Inches(3.64), Inches(4.4), items, 13, SLATE, 9)
-        x += Inches(4.15)
+    table_shape = sl.shapes.add_table(len(rows), 3, Inches(0.40), Inches(1.32), Inches(12.50), Inches(5.55))
+    table = table_shape.table
+    table.columns[0].width = Inches(2.15)
+    table.columns[1].width = Inches(5.15)
+    table.columns[2].width = Inches(5.20)
+    for r, row in enumerate(rows):
+        for c, val in enumerate(row):
+            cell = table.cell(r, c)
+            if r == 0:
+                fill = NAVY if c != 2 else TEAL
+                set_cell(cell, val, 12, WHITE, True, fill, PP_ALIGN.CENTER)
+            elif c == 0:
+                set_cell(cell, val, 12, NAVY, True, LIGHT_GOLD if r % 2 else OFF)
+            elif c == 1:
+                set_cell(cell, val, 12, SLATE, False, LIGHT_RED if r % 2 else OFF)
+            else:
+                set_cell(cell, val, 12, SLATE, False, LIGHT_TEAL if r % 2 else WHITE)
     footer(sl, 7)
     notes(
         sl,
-        "8:30–10:15. Quality: auto-accept is in scope and logged. HR: human column is the remaining job — higher skill, not fewer people as the pitch. If Legal flinches at auto-accept, point at sample audit + kill switch, do not reopen the strategy.",
+        _speech_goal(
+            "4",
+            "Read three rows only if short on time: Inbox, PASS path, PPAP. Efficiency: clicks leave the specialist. Cost: hours and launch delay. New capacity (not a claimed new revenue stream we have not booked): specialists become OEM-rule owners and supplier coaches — the work that actually protects customer scorecards. Do not invent a Johnson Electric dollar savings figure. The 50/day and 5,000 open are our desk facts; keep them.",
+        ),
     )
 
 
-def s08_architecture(prs):
-    sl = prs.slides.add_slide(prs.slide_layouts[6])
-    rect(sl, 0, 0, W, H, WHITE)
-    header(sl, "05  ·  Agentic workflow", "What we will build — five agents on our own IMDS account")
-    agents = [
-        ("Inbox\nTriage", "Poll received. Deduplicate. Age. Cluster GM vs VW vs Ford."),
-        ("Reviewer", "Rec 001 + the matching OEM pack. Score G/A/R. Cite node IDs."),
-        ("Decision\nwriter", "Auto-accept note or structured reject mapped to OEM codes."),
-        ("Outbound\npre-flight", "Before Propose/Send: recipient lint, version policy, OEM pack again."),
-        ("Supplier\nchaser", "Overdue requests, dummy-child chase, reminder cadence."),
-    ]
-    x = Inches(0.4)
-    for i, (t, b) in enumerate(agents):
-        fill = NAVY if i == 1 else WHITE
-        card(sl, x, Inches(1.18), Inches(2.4), Inches(2.85), fill, LINE)
-        tc = WHITE if i == 1 else NAVY
-        bc = RGBColor(0xD5, 0xDE, 0xE8) if i == 1 else SLATE
-        add_text(sl, x + Inches(0.10), Inches(1.30), Inches(2.20), Inches(0.7), [(t, 14, tc, True, PP_ALIGN.CENTER)])
-        add_text(sl, x + Inches(0.12), Inches(2.05), Inches(2.16), Inches(1.8), [(b, 12, bc, False, PP_ALIGN.CENTER)])
-        if i < 4:
-            chevron(sl, x + Inches(2.38), Inches(2.30), Inches(0.22), Inches(0.28), GOLD)
-        x += Inches(2.58)
-
-    layers = [
-        ("How we touch IMDS", "v1: attended/unattended automation of OUR company IMDS session only — our credentials, our inbox/outbox. No other company’s data. No marketplace scraping. IMDS Connect is a later paid option, not required to start."),
-        ("System of record we own", "GM / VW / Ford rule packs, labeled accept/reject history, rule-pack version on every decision, kill switch. That file is the IP."),
-        ("What we will not build in v1", "CAMDS. PCF / Catena-X. A purchased IMDS Plus license. A vendor platform. Those can wait until the desk is under control."),
-    ]
-    y = Inches(4.20)
-    for t, b in layers:
-        card(sl, Inches(0.5), y, Inches(12.3), Inches(0.88), OFF, LINE)
-        add_text(sl, Inches(0.7), y + Inches(0.12), Inches(3.1), Inches(0.64), [(t, 13, TEAL, True)])
-        add_text(sl, Inches(3.9), y + Inches(0.14), Inches(8.65), Inches(0.64), [(b, 12, SLATE, False)])
-        y += Inches(0.95)
-    footer(sl, 8)
-    notes(
-        sl,
-        "10:15–11:45. If challenged on scraping: we automate our licensed IMDS users for our company only. We do not touch other IMDS companies. Reviewer agent is the core; chaser can slip if time is short. Do not open a DXC commercial discussion unless asked.",
-    )
-
-
-def s09_market_build(prs):
+def s08_budget(prs):
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     rect(sl, 0, 0, W, H, WHITE)
     header(
         sl,
-        "06  ·  What exists vs what we do",
-        "The market proves the prize. We still build — $0, our OEM mix, our IP.",
-        "Vendor figures below are vendor-reported. We keep them as evidence the problem is solvable. They are not a purchase recommendation.",
+        "05  ·  Budget & ROI",
+        "Internal program hours. Zero software license. Payback inside a quarter.",
+        "Planning model for this briefing — not booked Johnson Electric P&L. No vendor invoice.",
     )
-    # left: market proof
-    card(sl, Inches(0.5), Inches(1.50), Inches(6.05), Inches(5.35), WHITE, LINE)
-    rect(sl, Inches(0.5), Inches(1.50), Inches(6.05), Inches(0.48), TEAL)
-    add_text(sl, Inches(0.7), Inches(1.58), Inches(5.65), Inches(0.32), [("Market proof (not a shopping list)", 14, WHITE, True)])
-    add_bullets(
-        sl,
-        Inches(0.7),
-        Inches(2.15),
-        Inches(5.6),
-        Inches(4.4),
-        [
-            "DXC IMDS Plus / Inbox Automation: Examiner profiles, auto-accept if no errors. Paid. We have none of it.",
-            "iPoint / Assent, APA MDS Xpress: enterprise IMDS platforms. Not in our estate.",
-            "Predco (vendor-reported): −89% rejects, −72% cycle, ~18 days PPAP recovery, 1.8% reject rate across 12 Tier-1s.",
-            "Certivo (vendor-reported): 30–40% first-pass reject → <5%; 4–6 weeks → ~4 hours; 80% less prep labor.",
-            "Tetra Tech: draft trees from drawings/photos — supplier-engagement aid, not our inbox engine.",
-        ],
-        13,
-        SLATE,
-        7,
-    )
-
-    card(sl, Inches(6.80), Inches(1.50), Inches(6.05), Inches(5.35), NAVY, None)
-    add_text(sl, Inches(7.00), Inches(1.68), Inches(5.65), Inches(0.32), [("Why leadership should fund effort, not software", 14, GOLD, True)])
-    add_bullets(
-        sl,
-        Inches(7.00),
-        Inches(2.15),
-        Inches(5.6),
-        Inches(4.4),
-        [
-            "Budget is own effort. No license, no integrator, no platform RFP.",
-            "Nothing is installed today. Buying Plus or iPoint is a second program, not a shortcut to GM/VW/Ford packs.",
-            "The scarce asset is labeled decisions and three OEM overlays — that knowledge already sits in Supplier Quality.",
-            "A vendor does not know our tree conventions. We do.",
-            "We will reuse vendor ideas (score, cite, structured reject, pre-flight). We will not rent the desk.",
-        ],
-        13,
-        RGBColor(0xD5, 0xDE, 0xE8),
-        8,
-    )
-    footer(sl, 9)
-    notes(
-        sl,
-        "11:45–13:15. Keep Predco/Certivo as proof, then pivot hard to build. If someone says “just buy Plus,” answer: Plus is a paid Examiner; it does not encode GMW3059 / VW 91101 / Ford RSMS for us, and we have no budget. Build captures the rule packs we already apply by hand.",
-    )
-
-
-def s10_governance(prs):
-    sl = prs.slides.add_slide(prs.slide_layouts[6])
-    rect(sl, 0, 0, W, H, WHITE)
-    header(sl, "07  ·  Controls", "Auto-accept is allowed. Uncontrolled auto-accept is not.")
-    rows = [
-        ["Control", "Owner", "What it prevents"],
-        ["Rule-pack version stamped on every accept/reject", "Supplier Quality", "Orphan decisions after a GADSL or OEM-guide change"],
-        ["Kill switch — halt auto-accept / auto-reject in one action", "Quality + SQ Director", "A bad pack promoting into production"],
-        ["Sample audit of greens (daily at start, then weekly)", "Quality", "Silent wrongful-accept drift"],
-        ["Human-mandatory list (novel chemistry, derogation, dispute)", "SQ Director", "Liability and customer relationship sitting on a bot"],
-        ["Own-account only — our IMDS credentials, our company", "IT / SQ", "Any appearance of accessing another company’s IMDS data"],
-        ["Role redesign: specialists own OEM packs and amber/novel", "HR + SQ Director", "Framing this as a headcount cut instead of a skill shift"],
+    kpis = [
+        ("$0", "Software licenses", "Classic IMDS browser + Colab Secrets. No Plus, no Examiner, no integrator."),
+        ("~60 h", "Implementation", "Govern the live agent: logging, sample audit, halt, recipient/contact policy."),
+        ("~16 h", "Training", "Specialists: exception handling, audit sampling, emergency halt drill."),
+        ("~4 h/mo", "Maintenance", "Rule drift, recipients, contact fallback, secret hygiene, weekly sample audit."),
     ]
-    table_shape = sl.shapes.add_table(len(rows), 3, Inches(0.45), Inches(1.18), Inches(12.4), Inches(4.85))
+    x = Inches(0.45)
+    for v, lab, sub in kpis:
+        kpi(sl, x, Inches(1.38), Inches(3.05), Inches(1.55), v, lab, sub, TEAL if v == "$0" else NAVY)
+        x += Inches(3.20)
+
+    rows = [
+        ["ROI lever", "How we count it", "Why it pays back"],
+        [
+            "Hours on Check / accept / forward / propose",
+            "15 min median × 50 MDS/day ≈ 12.5 specialist-hours/day (desk model)",
+            "Even ~25% of inbound automated returns 3+ hours/day. 60 implementation hours recover in weeks.",
+        ],
+        [
+            "IMDS non-compliance / OEM scorecards",
+            "GM, VW, Ford completeness and bounce rate on our MDS",
+            "A scorecard miss is commercial risk. Logged PASS/FAIL is the control Finance and Quality can see.",
+        ],
+        [
+            "Delayed PPAP / launch hold",
+            "Unaccepted or bouncing MDS blocks production authorization",
+            "One delayed PPAP dwarfs the pilot cost. Same-day reject also shortens supplier rework.",
+        ],
+        [
+            "Payback period",
+            "Target: inside 90 days of pilot start",
+            "Hours recovered + avoided launch delay. Revisit after the 20-MDS pilot with measured minutes/MDS.",
+        ],
+    ]
+    table_shape = sl.shapes.add_table(len(rows), 3, Inches(0.40), Inches(3.12), Inches(12.50), Inches(3.75))
     table = table_shape.table
-    table.columns[0].width = Inches(5.5)
-    table.columns[1].width = Inches(2.5)
-    table.columns[2].width = Inches(4.4)
+    table.columns[0].width = Inches(3.30)
+    table.columns[1].width = Inches(4.70)
+    table.columns[2].width = Inches(4.50)
     for r, row in enumerate(rows):
         for c, val in enumerate(row):
             cell = table.cell(r, c)
@@ -616,246 +675,344 @@ def s10_governance(prs):
             elif c == 0:
                 set_cell(cell, val, 12, NAVY, True, LIGHT_GOLD if r % 2 else OFF)
             else:
-                set_cell(cell, val, 12, SLATE, False, WHITE if r % 2 else OFF)
+                set_cell(cell, val, 11, SLATE, False, WHITE if r % 2 else OFF)
+    footer(sl, 8)
+    notes(
+        sl,
+        _speech_goal(
+            "5",
+            "Emphasize: this is own effort, not a purchase. Software is $0. Implementation is operationalizing an agent that already runs. Training is role shift, not a classroom tour. Maintenance is hours per month, not a platform contract. Payback: say “inside one quarter on hours alone” and “one PPAP delay exceeds the pilot.” If Finance wants a dollar ROI, offer to price the 12.5 hours/day at our loaded specialist rate after the meeting — do not invent a figure on the slide. Risk mitigation: emergency halt, sample audit, own-account only.",
+        ),
+    )
+
+
+def s09_roadmap(prs):
+    sl = prs.slides.add_slide(prs.slide_layouts[6])
+    rect(sl, 0, 0, W, H, WHITE)
+    header(
+        sl,
+        "06  ·  Implementation roadmap",
+        "Pilot → Scale → Optimize. Controlled rollout, named governance.",
+        "We do not flip auto-accept on the 5,000-row stock on day one.",
+    )
+    phases = [
+        (TEAL, "PILOT", "Days 1–30", "20 MDS live batches on our company account. Log every PASS/FAIL. Sample-audit greens. Freeze recipient IDs 9994 / 293798 and the Theresa-plus-fallback contact rule. Emergency halt stays in Supplier Quality’s hands. Success: the 20-row loop completes without leftover-ID mismatch."),
+        (BLUE, "SCALE", "Days 31–60", "Raise daily burn on NEW inbound. Auto-reject FAIL patterns with structured text. Shadow-score remaining greens beside the specialist. Operations uses PPAP clock as the success metric. Supply chain chases dummy children the agent cannot invent."),
+        (NAVY, "OPTIMIZE", "Days 61–90+", "Auto-accept greens with weekly audit. Start a measured burn-down of the 5,000. Encode GM / VW / Ford overlays as Examiner-equivalent packs on top of Check. Role shift: specialists own rule packs and exceptions — not inbox volume."),
+    ]
+    x = Inches(0.45)
+    for color, title, when, body in phases:
+        card(sl, x, Inches(1.38), Inches(4.05), Inches(4.05), WHITE, LINE)
+        rect(sl, x, Inches(1.38), Inches(4.05), Inches(0.85), color)
+        add_text(sl, x + Inches(0.18), Inches(1.46), Inches(3.70), Inches(0.32), [(title, 16, WHITE, True)])
+        add_text(sl, x + Inches(0.18), Inches(1.80), Inches(3.70), Inches(0.32), [(when, 12, GOLD, False)])
+        add_text(sl, x + Inches(0.18), Inches(2.38), Inches(3.70), Inches(2.85), [(body, 13, SLATE, False)])
+        x += Inches(4.20)
+
+    card(sl, Inches(0.45), Inches(5.58), Inches(12.40), Inches(1.38), LIGHT_GOLD, GOLD)
+    add_text(sl, Inches(0.65), Inches(5.68), Inches(12.00), Inches(0.28), [("GOVERNANCE — non-negotiable", 12, NAVY, True)])
     add_text(
         sl,
-        Inches(0.5),
-        Inches(6.18),
-        Inches(12.3),
-        Inches(0.8),
+        Inches(0.65),
+        Inches(6.00),
+        Inches(12.00),
+        Inches(0.82),
         [
             (
-                "HR: the desk does not disappear. The job becomes OEM-rule ownership, exception judgment, and supplier coaching. That is the only staffing model that survives a 5,000-MDS backlog without a hiring wave.",
+                "Accountable owner: Supplier Quality Director. Executive sponsorship from VP/GM so the pilot is not re-argued every week. Own-account only. Sample audit of PASS accepts. Emergency halt on auto-accept / auto-reject in one action. Human-mandatory list: novel chemistry, OEM derogation, dispute. Stakeholder alignment: Quality (audit), Operations (PPAP clock), Supply chain (dummy-child follow-up), HR (role redesign, not a headcount cut).",
+                13,
+                SLATE,
+                False,
+            )
+        ],
+    )
+    footer(sl, 9)
+    notes(
+        sl,
+        _speech_goal(
+            "6",
+            "Stress controlled rollout. Pilot is 20 MDS, not the 5,000. Scale is new inbound. Optimize is when auto-accept is earned. Governance: executive sponsorship, emergency halt, sample audit, own-account only. If Legal flinches at auto-accept, keep it in Optimize and run FAIL-reject + logged PASS in Pilot. HR: say the desk does not disappear — the job becomes OEM-rule ownership.",
+        ),
+    )
+
+
+def s10_cases(prs):
+    sl = prs.slides.add_slide(prs.slide_layouts[6])
+    rect(sl, 0, 0, W, H, WHITE)
+    header(
+        sl,
+        "07  ·  Case studies",
+        "External proof the category works. Not Johnson Electric results.",
+        "Vendor-reported and industry-analog. We keep OEM knowledge in-house; we do not rent the desk.",
+    )
+    card(sl, Inches(0.45), Inches(1.32), Inches(12.40), Inches(0.52), LIGHT_GOLD, GOLD)
+    add_text(
+        sl,
+        Inches(0.65),
+        Inches(1.40),
+        Inches(12.00),
+        Inches(0.36),
+        [("ILLUSTRATIVE / EXTERNAL — do not quote these as Johnson Electric metrics", 14, NAVY, True)],
+    )
+    cases = [
+        (
+            "Automotive IMDS platforms",
+            "DXC IMDS Plus / Inbox Automation; iPoint; APA MDS Xpress",
+            "Paid Examiner profiles and auto-accept if no errors. Proves OEMs already accept machine-paced inbox work. We have none of it, and we are not opening an RFP in v1.",
+        ),
+        (
+            "Predco — vendor-reported, 12 Tier-1s",
+            "Automotive supply-chain compliance automation",
+            "−89% rejects, −72% cycle time, ~18 days PPAP recovery, 1.8% reject rate. Evidence the problem is solvable. Not a purchase recommendation. Not our ROI.",
+        ),
+        (
+            "Certivo — vendor-reported",
+            "Agentic / automated MDS preparation",
+            "First-pass reject 30–40% → <5%; cycle 4–6 weeks → ~4 hours; ~80% less prep labor. Productivity and customer-readiness analog. Not booked JE revenue lift.",
+        ),
+    ]
+    x = Inches(0.45)
+    for title, sub, body in cases:
+        card(sl, x, Inches(2.02), Inches(4.05), Inches(3.55), WHITE, LINE)
+        rect(sl, x, Inches(2.02), Inches(4.05), Inches(0.85), TEAL)
+        add_text(sl, x + Inches(0.16), Inches(2.10), Inches(3.73), Inches(0.40), [(title, 13, WHITE, True)])
+        add_text(sl, x + Inches(0.16), Inches(2.50), Inches(3.73), Inches(0.30), [(sub, 11, LIGHT_GOLD, False)])
+        add_text(sl, x + Inches(0.16), Inches(3.02), Inches(3.73), Inches(2.35), [(body, 13, SLATE, False)])
+        x += Inches(4.20)
+
+    add_text(
+        sl,
+        Inches(0.50),
+        Inches(5.72),
+        Inches(12.30),
+        Inches(1.20),
+        [
+            (
+                "What we take from them: score, cite, structured reject, outbound pre-flight. What we do not do: outsource GM / VW / Ford overlays or our 5,000-row desk to a vendor that does not know our tree conventions. Johnson Electric metrics stay the ones on the pain and impact slides (50/day, ~5,000 open, 20-MDS live agent). Customer-satisfaction and revenue-lift figures above are theirs, not ours.",
                 14,
                 NAVY,
-                True,
+                False,
             )
         ],
     )
     footer(sl, 10)
     notes(
         sl,
-        "13:15–14:45. Look at Quality and HR when you read the last line. GM/VP need to hear kill switch. IT needs own-account only. Do not linger — the next slide is the commitment.",
+        _speech_goal(
+            "7",
+            "Say “external / illustrative” before any number. Predco and Certivo are vendor-reported; they reduce perceived risk, they are not our scorecard. If someone says “just buy Plus,” answer: Plus is a paid Examiner; it does not encode GMW3059 / VW 91101 / Ford RSMS for us, and we have no software budget. Build captures the rule packs we already apply by hand. Productivity analog is enough; do not claim a JE customer-satisfaction or revenue-lift number we have not measured.",
+        ),
     )
 
 
-def s11_targets(prs):
+def s11_cta(prs):
     sl = prs.slides.add_slide(prs.slide_layouts[6])
-    rect(sl, 0, 0, W, H, WHITE)
-    header(
-        sl,
-        "08  ·  Targets and 90 days",
-        "Program targets we will manage to — and what 90 days actually delivers",
-        "100% first-pass, same-day accept, and zero PPAP delay are the operating contract. The 5,000 stock is a drain plan, not a day-1 miracle.",
-    )
-    kpis = [
-        ("100%", "First-pass yield to OEM", "Outbound MDS to GM / VW / Ford pre-flighted against that OEM pack before Propose"),
-        ("Same day", "Request-to-accept on NEW MDS", "Green auto-accept the day it arrives. Red auto-reject the same day with a cited reason."),
-        ("Zero", "PPAP delays from IMDS", "No launch waits on an unaccepted or bouncing MDS for parts in this scope."),
-    ]
-    x = Inches(0.5)
-    for v, lab, sub in kpis:
-        kpi(sl, x, Inches(1.50), Inches(4.0), Inches(1.70), v, lab, sub, TEAL if v != "Zero" else NAVY)
-        x += Inches(4.15)
-
-    phases = [
-        ("Days 1–30", "Instrument", "Log every manual accept/reject with reason. Freeze v0 GM/VW/Ford checklists. Gold-label 200 historical MDS. No auto-decision yet."),
-        ("Days 31–60", "Auto-reject live", "Red patterns fire with structured text. Greens scored in shadow beside the specialist. Precision review twice weekly."),
-        ("Days 61–90", "Auto-accept live", "Greens auto-accept with audit sample. Outbound pre-flight before Propose. Start draining the 5,000 at a measured daily burn-down."),
-    ]
-    x = Inches(0.5)
-    for t, h2, b in phases:
-        card(sl, x, Inches(3.42), Inches(4.0), Inches(3.40), WHITE, LINE)
-        add_text(sl, x + Inches(0.18), Inches(3.55), Inches(3.64), Inches(0.28), [(t.upper(), 11, GOLD, True)])
-        add_text(sl, x + Inches(0.18), Inches(3.82), Inches(3.64), Inches(0.32), [(h2, 16, NAVY, True)])
-        add_text(sl, x + Inches(0.18), Inches(4.25), Inches(3.64), Inches(2.35), [(b, 13, SLATE, False)])
-        x += Inches(4.15)
-    footer(sl, 11)
-    notes(
-        sl,
-        "14:45–16:30. Be the adult on 5,000: same-day is for new intake once auto-accept is on; stock drains on a burn-down. 100% FPY is outbound to OEM, not a claim that every sub-supplier MDS is born perfect — reds still auto-reject. If GM/VP want a date for backlog = 0, say we will table a burn-down after day 30 when we have nodes/minute measured.",
-    )
-
-
-def s12_ask(prs):
-    sl = prs.slides.add_slide(prs.slide_layouts[6])
-    rect(sl, 0, 0, W, H, WHITE)
-    header(sl, "Decision requested", "Endorse the build. Name the owner. Give air cover.")
-    asks = [
-        ("1", "Endorse", "Adopt an internally led agentic IMDS workflow as the house approach for GM, VW, and Ford MDS — not a vendor RFP, not “hire more inbox.”"),
-        ("2", "Accountable owner", "Supplier Quality Director owns the rule packs, the kill switch, the 90-day milestones, and the weekly burn-down of the 5,000."),
-        ("3", "Air cover", "Permit automation of our own IMDS company account (our users, our data only) so auto-accept / auto-reject can run without a DXC license in v1."),
-        ("4", "Function support", "Quality: sample audit. Operations: PPAP clock as the success metric. Supply chain: supplier chase on dummy children. HR: rewrite the specialist role to OEM-rule owner."),
-    ]
-    y = Inches(1.15)
-    for n, t, b in asks:
-        card(sl, Inches(0.5), y, Inches(12.3), Inches(1.12), WHITE, LINE)
-        oval(sl, Inches(0.68), y + Inches(0.32), Inches(0.42), Inches(0.42), GOLD)
-        add_text(sl, Inches(0.68), y + Inches(0.36), Inches(0.42), Inches(0.34), [(n, 14, NAVY, True, PP_ALIGN.CENTER)])
-        add_text(sl, Inches(1.30), y + Inches(0.14), Inches(2.2), Inches(0.8), [(t, 16, NAVY, True)])
-        add_text(sl, Inches(3.55), y + Inches(0.18), Inches(9.0), Inches(0.8), [(b, 13, SLATE, False)])
-        y += Inches(1.20)
-
-    card(sl, Inches(0.5), Inches(6.00), Inches(12.3), Inches(1.05), LIGHT_GOLD, GOLD)
+    rect(sl, 0, 0, W, H, NAVY)
+    rect(sl, 0, 0, Inches(0.18), H, GOLD)
     add_text(
         sl,
-        Inches(0.72),
-        Inches(6.14),
-        Inches(11.9),
-        Inches(0.80),
+        Inches(0.7),
+        Inches(0.40),
+        Inches(12.0),
+        Inches(0.28),
+        [("08  ·  CALL TO ACTION  ·  27 AUGUST 2026", 12, GOLD, True)],
+    )
+    add_text(
+        sl,
+        Inches(0.7),
+        Inches(0.90),
+        Inches(12.1),
+        Inches(1.10),
+        [("Invest in Agentic AI Today.", 36, WHITE, True)],
+    )
+    add_text(
+        sl,
+        Inches(0.7),
+        Inches(2.10),
+        Inches(12.0),
+        Inches(0.55),
         [
             (
-                "This is already scoped, already owned, and already costed at zero software spend. What Supplier Quality is asking for is leadership recognition of that standard — and the authority to run it.",
-                15,
-                NAVY,
+                "Approve the 20-MDS live pilot and the internal budget line this week.",
+                20,
+                GOLD,
                 True,
             )
         ],
     )
-    footer(sl, 12)
+    asks = [
+        ("1", "Pilot", "Authorize live runs of 20 received MDS on our company IMDS account (Colab one-button, Secrets in 🔑)."),
+        ("2", "Budget", "Allocate the internal line: ~60 h implementation, ~16 h training, ~4 h/month maintenance. $0 licenses."),
+        ("3", "Owner", "Supplier Quality Director (Wong) owns rule packs, emergency halt, 90-day milestones, and the 5,000 burn-down."),
+        ("4", "Sponsorship", "VP/GM executive sponsorship and stakeholder alignment so the pilot is the house approach — not a weekly re-litigation of buy vs hire."),
+    ]
+    y = Inches(2.80)
+    for n, t, b in asks:
+        card(sl, Inches(0.7), y, Inches(11.9), Inches(0.85), NAVY_MID, None)
+        oval(sl, Inches(0.88), y + Inches(0.22), Inches(0.42), Inches(0.42), GOLD)
+        add_text(sl, Inches(0.88), y + Inches(0.28), Inches(0.42), Inches(0.32), [(n, 14, NAVY, True, PP_ALIGN.CENTER)])
+        add_text(sl, Inches(1.50), y + Inches(0.12), Inches(1.70), Inches(0.60), [(t, 16, WHITE, True)])
+        add_text(sl, Inches(3.30), y + Inches(0.16), Inches(9.05), Inches(0.58), [(b, 14, RGBColor(0xD5, 0xDE, 0xE8), False)])
+        y += Inches(0.95)
     notes(
         sl,
-        "16:30–18:00 then stop for questions (2 min buffer). Read the four asks. Close on the gold bar — do not add a new idea. If they ask budget, say own effort only. If they ask headcount, say role redesign not reduction. If they ask buy vs build, say build; vendors are evidence. Leave silence after the last line so VP/GM can endorse.",
+        _speech_goal(
+            "8",
+            "Read the bold line exactly: “Invest in Agentic AI Today.” Then the specific ask: approve the 20-MDS pilot and the budget line. Walk the four boxes. Stop. Leave silence so VP/GM can endorse. If they ask budget, say own effort only — 60 / 16 / 4 hours. If they ask headcount, say role redesign not reduction. If they ask buy vs build, say build; vendors are evidence. Do not add a new idea after the last line.",
+        ),
     )
 
 
-def s13_appendix(prs):
+def s12_appendix(prs):
     sl = prs.slides.add_slide(prs.slide_layouts[6])
     rect(sl, 0, 0, W, H, WHITE)
     header(
         sl,
-        "Appendix",
-        "Glossary and v0 OEM checklists",
-        "Reference for Q&A. Validate against current GM / VW / Ford IMDS portals before production use.",
+        "Appendix  ·  Q&A only",
+        "Live-agent facts and glossary — skip in the 20-minute slot",
+        "Validate OEM overlays against current GM / VW / Ford IMDS portals before production use.",
     )
     glossary = [
-        ("Air cover", "Leadership backs SQ to automate without reopening buy/hire every week."),
-        ("Parallel inbox", "Hire more people to do the same manual view/accept/reject work."),
-        ("PCF", "Product Carbon Footprint — emissions per part (Rec 027; not in v1)."),
-        ("Directed buy", "OEM nominates sub-supplier; lower tier Proposes to OEM and to you."),
-        ("Overlay", "OEM-specific rules on top of Rec 001 + IMDS Check."),
-        ("Deduplicate", "One queue item per real MDS — no double-processing resends."),
-        ("Age", "Time in status; prioritize VIP OEM parts and SLA risk."),
-        ("Dummy child", "Placeholder node instead of accepted sub-supplier MDS."),
-        ("Score / cite", "Rate green/amber/red; flag exact tree node and field."),
-        ("Structured reject", "Templated, coded reason — not “check Rec 001.”"),
-        ("Pre-flight", "Run OEM pack on outbound MDS before Propose/Send."),
-        ("Orphan decision", "Accept/reject with no rule-pack version on record."),
-        ("Amber / novel", "Uncertain or new case — human decides, bot does not."),
-        ("OEM-rule owner", "Specialist owns GM/VW/Ford packs, not inbox volume."),
+        ("Executive sponsorship", "VP/GM publicly backs the pilot so buy-vs-hire is not reopened weekly."),
+        ("Emergency halt", "One action stops auto-accept / auto-reject if a pack or Check rule drifts."),
+        ("Own-account only", "Our IMDS users, our company inbox/outbox. No other company’s data."),
+        ("PASS", "IMDS Check with 0 errors → accept + forward + propose to 9994, 293798."),
+        ("FAIL", "Check failure → reject. No forward, no propose."),
+        ("Preferred contact", "Qu, Theresa. Fallback: any real Supplier Data name (not blank)."),
+        ("Network resume", "After a drop, wait and continue the 20-row loop instead of aborting."),
+        ("Save-changes Yes", "Same forwarded MDS, switching Supplier / Recipient tabs."),
+        ("Save-changes No", "Leaving a leftover own-MDS sheet to open the next received row."),
+        ("Dummy child", "Placeholder node instead of an accepted sub-supplier MDS."),
+        ("Pre-flight", "Run the OEM overlay on outbound MDS before Propose."),
+        ("OEM-rule owner", "Specialist owns GM/VW/Ford packs and exceptions, not inbox volume."),
     ]
-    # glossary table 2 columns of term | meaning
     rows = [["Term", "Meaning", "Term", "Meaning"]]
     for i in range(0, len(glossary), 2):
         a, b = glossary[i]
-        if i + 1 < len(glossary):
-            c, d = glossary[i + 1]
-        else:
-            c, d = "", ""
+        c, d = glossary[i + 1] if i + 1 < len(glossary) else ("", "")
         rows.append([a, b, c, d])
-    table_shape = sl.shapes.add_table(len(rows), 4, Inches(0.45), Inches(1.12), Inches(12.4), Inches(2.55))
+    table_shape = sl.shapes.add_table(len(rows), 4, Inches(0.40), Inches(1.28), Inches(12.50), Inches(5.55))
     table = table_shape.table
-    widths = [1.55, 4.65, 1.55, 4.65]
+    widths = [2.15, 4.10, 2.15, 4.10]
     for i, w in enumerate(widths):
         table.columns[i].width = Inches(w)
     for r, row in enumerate(rows):
         for c, val in enumerate(row):
             cell = table.cell(r, c)
             if r == 0:
-                set_cell(cell, val, 10, WHITE, True, NAVY, PP_ALIGN.CENTER)
+                set_cell(cell, val, 11, WHITE, True, NAVY, PP_ALIGN.CENTER)
             elif c in (0, 2):
-                set_cell(cell, val, 9, NAVY, True, LIGHT_GOLD if r % 2 else OFF)
+                set_cell(cell, val, 11, NAVY, True, LIGHT_GOLD if r % 2 else OFF)
             else:
-                set_cell(cell, val, 9, SLATE, False, WHITE if r % 2 else OFF)
-
-    add_text(
-        sl,
-        Inches(0.5),
-        Inches(3.72),
-        Inches(12.3),
-        Inches(0.28),
-        [("v0 pre-Propose checklist — encode into Reviewer agent (days 1–30)", 12, NAVY, True)],
-    )
-    oems = [
-        ("GM", TEAL, [
-            "Propose (not Send); internally released",
-            "Correct GM org unit / plant recipient",
-            "Part number + description on recipient tab",
-            "Weight within GM tolerance; GMW3059 clean",
-            "Forwarding allowed if pass-through; no dummy children",
-        ]),
-        ("VW", BLUE, [
-            "VW 91101 + Konzern IMDS instructions",
-            "Correct plant / org ID on recipient",
-            "Part naming per VW guide; sibling rules",
-            "Polymer marking / process fields if required",
-            "VW pack pre-flight — no reds before Propose",
-        ]),
-        ("Ford", COPPER, [
-            "Ford RSMS substance compliance",
-            "Supplier code + part number pairing",
-            "Legacy / EOP flags if applicable",
-            "Correct Ford org unit; tree vs BOM",
-            "Ford pack pre-flight — no reds before Propose",
-        ]),
-    ]
-    x = Inches(0.5)
-    for title, color, items in oems:
-        card(sl, x, Inches(4.02), Inches(4.0), Inches(2.95), WHITE, LINE)
-        rect(sl, x, Inches(4.02), Inches(4.0), Inches(0.42), color)
-        add_text(sl, x + Inches(0.14), Inches(4.08), Inches(3.72), Inches(0.32), [(title, 13, WHITE, True)])
-        add_bullets(sl, x + Inches(0.14), Inches(4.52), Inches(3.72), Inches(2.35), items, 11, SLATE, 6)
-        x += Inches(4.15)
-
-    add_text(
-        sl,
-        Inches(0.5),
-        Inches(7.02),
-        Inches(12.3),
-        Inches(0.22),
-        [
-            (
-                "Predco vendor-reported (−89% rejects, −72% cycle): industry proof only — not our ROI. HR: role shifts from inbox clerk to OEM-rule owner + exception judgment.",
-                10,
-                MUTED,
-                False,
-            )
-        ],
-    )
-    footer(sl, 13)
+                set_cell(cell, val, 11, SLATE, False, WHITE if r % 2 else OFF)
+    footer(sl, 12)
     notes(
         sl,
-        "Appendix — use only if asked in Q&A; do not present in the 20-minute slot unless someone asks for definitions. Full elaboration: Air cover = VP/GM publicly defends automation. Parallel inbox = hiring without encoding rules. Directed buy example: GM directs Tier-2 bracket; they Propose to GM and to us. Dummy child chase = email sub-suppliers with missing accepted child MDS. Orphan decision = audit cannot replay which rule version applied. Amber examples: weight near limit, new supplier. Novel: derogation, new chemistry. OEM-rule owner job description: maintain rule packs, audit auto-greens, coach suppliers. Sources: public.mdsystem.com OEM guides, GMW3059, VW 91101, Ford RSMS.",
+        "APPENDIX — do not present in the 20-minute slot unless someone asks for definitions. Directed-buy example if asked: OEM nominates a sub-supplier; they Propose to the OEM and to us. Dummy-child follow-up: Supply chain emails sub-suppliers with missing accepted child MDS. Orphan decision: accept/reject with no rule-pack version on record. Sources: public.mdsystem.com OEM guides, GMW3059, VW 91101, Ford RSMS. Live agent: imds_agent_v2.py; Colab Secrets IMDS_USERNAME, IMDS_PASSWORD, OTP_SECRET.",
     )
 
 
-def main():
+def all_deck_text(prs: Presentation) -> str:
+    chunks: list[str] = []
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                chunks.append(shape.text_frame.text)
+            if shape.has_table:
+                for row in shape.table.rows:
+                    for cell in row.cells:
+                        chunks.append(cell.text_frame.text)
+        notes_slide = slide.notes_slide
+        chunks.append(notes_slide.notes_text_frame.text)
+    return "\n".join(chunks)
+
+
+def assert_no_forbidden_jargon(prs: Presentation) -> None:
+    blob = all_deck_text(prs).lower()
+    hits = [term for term in FORBIDDEN_JARGON if term in blob]
+    if hits:
+        raise SystemExit(f"Forbidden jargon found in deck: {hits}")
+
+
+def export_docs(pptx_path: Path) -> None:
+    """Copy pptx into docs/ and render PDF + PNG slides when LibreOffice is available."""
+    DOCS_PPTX.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(pptx_path, DOCS_PPTX)
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        print("LibreOffice not found — skipped PDF/PNG export", file=sys.stderr)
+        return
+    outdir = ROOT / "docs"
+    env = os.environ.copy()
+    env.setdefault("HOME", "/tmp")
+    subprocess.run(
+        [soffice, "--headless", "--norestore", "--convert-to", "pdf", "--outdir", str(outdir), str(pptx_path)],
+        check=True,
+        env=env,
+    )
+    pdf = DOCS_PDF
+    if not pdf.exists():
+        print("PDF was not produced", file=sys.stderr)
+        return
+    SLIDES_DIR.mkdir(parents=True, exist_ok=True)
+    for old in SLIDES_DIR.glob("slide-*.png"):
+        old.unlink()
+    prefix = SLIDES_DIR / "slide"
+    subprocess.run(["pdftoppm", "-png", "-r", "140", str(pdf), str(prefix)], check=True)
+    # pdftoppm writes slide-1.png; normalize to slide-01.png
+    produced = sorted(SLIDES_DIR.glob("slide-*.png"), key=lambda p: int("".join(ch for ch in p.stem if ch.isdigit()) or "0"))
+    for i, path in enumerate(produced, 1):
+        dest = SLIDES_DIR / f"slide-{i:02d}.png"
+        if path != dest:
+            if dest.exists():
+                dest.unlink()
+            path.rename(dest)
+    print(f"Exported {DOCS_PDF} and {len(list(SLIDES_DIR.glob('slide-*.png')))} PNGs")
+
+
+def build() -> Presentation:
     prs = Presentation()
     prs.slide_width = W
     prs.slide_height = H
     builders = [
         s01_title,
-        s02_situation,
-        s03_imds,
-        s04_roles,
-        s05_oem,
-        s06_time,
-        s07_agentic,
-        s08_architecture,
-        s09_market_build,
-        s10_governance,
-        s11_targets,
-        s12_ask,
-        s13_appendix,
+        s02_storyboard_a,
+        s03_storyboard_b,
+        s04_pain,
+        s05_solution,
+        s06_live_agent,
+        s07_impact,
+        s08_budget,
+        s09_roadmap,
+        s10_cases,
+        s11_cta,
+        s12_appendix,
     ]
     global TOTAL
     TOTAL = len(builders)
     for fn in builders:
         fn(prs)
+    assert_no_forbidden_jargon(prs)
+    return prs
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--export-docs", action="store_true", help="Also write docs/ pptx, PDF, and PNG slides")
+    args = parser.parse_args(argv)
+    prs = build()
     OUT.parent.mkdir(parents=True, exist_ok=True)
     prs.save(str(OUT))
     print(f"Wrote {OUT} ({TOTAL} slides)")
+    if args.export_docs:
+        export_docs(OUT)
+        shutil.copy2(OUT, DOCS_PPTX)
+    else:
+        DOCS_PPTX.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(OUT, DOCS_PPTX)
+        print(f"Copied {DOCS_PPTX}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
