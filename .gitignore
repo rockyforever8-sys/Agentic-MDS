@@ -1,0 +1,8 @@
+ppap_agent/data/*.db
+ppap_agent/data/seed_meta.json
+.env
+*.pyc
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
