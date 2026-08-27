@@ -15,8 +15,8 @@ python -m ppap_agent batch          # Batch process all (supervisor graph)
 # Animated interactive UI (recommended demo)
 streamlit run ppap_agent/demo_animated.py
 
-# Google Colab
-# Open PPAP_Colab_Start_Here.ipynb in Colab, or:
+# Google Colab (working notebook — clones Agentic-MDS, not the empty Agentic-PPAP repo)
+# https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/cursor/ppap-quality-agent-17d5/PPAP_Colab_Start_Here.ipynb
 python colab_ppap_demo.py
 ```
 
