@@ -51,6 +51,9 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertIn("def return_to_inbox_results", text)
         self.assertIn("Check waiter missed the panel", text)
         self.assertIn("Continuing with remaining rows", text)
+        self.assertIn("def wait_for_connectivity", text)
+        self.assertIn("def ensure_imds_session", text)
+        self.assertIn("Waiting to reconnect, then retrying this row", text)
         self.assertIn("Recipient [", text)
         self.assertIn("Contact display value:", text)
         self.assertIn("Propose Failed (Contact must be specified)", text)
@@ -287,6 +290,27 @@ class CompanyLookupHelpers(unittest.TestCase):
         self.assertFalse(imds_agent_v2.check_results_present(""))
         self.assertEqual(imds_agent_v2.parse_ui_check_counts("Check results - 0 Error(s) / 0 Warning(s)"), (0, 0))
         self.assertTrue(imds_agent_v2.is_passing_check_results_text("Check results - 0 Error(s) / 0 Warning(s)"))
+
+
+class NetworkResumeTests(unittest.TestCase):
+    def test_network_wait_default_is_fifteen_minutes(self):
+        self.assertEqual(imds_agent_v2.network_wait_seconds(""), 15 * 60)
+        self.assertEqual(imds_agent_v2.network_wait_seconds("20"), 20 * 60)
+        self.assertEqual(imds_agent_v2.network_wait_seconds("abc"), 15 * 60)
+
+    def test_transient_network_error_not_xpath_timeout(self):
+        self.assertTrue(imds_agent_v2.is_transient_network_error("net::ERR_INTERNET_DISCONNECTED"))
+        self.assertTrue(imds_agent_v2.is_transient_network_error("net::ERR_NAME_NOT_RESOLVED"))
+        self.assertTrue(imds_agent_v2.is_transient_network_error("Failed to load login page: Timeout"))
+        self.assertFalse(imds_agent_v2.is_transient_network_error("Timeout 15000ms exceeded."))
+        self.assertFalse(imds_agent_v2.is_transient_network_error("Row 6 not found"))
+
+    def test_action_result_is_complete(self):
+        self.assertTrue(imds_agent_v2.action_result_is_complete("Accepted, forwarded, proposed"))
+        self.assertTrue(imds_agent_v2.action_result_is_complete("Rejected"))
+        self.assertFalse(imds_agent_v2.action_result_is_complete("Pending action"))
+        self.assertFalse(imds_agent_v2.action_result_is_complete("Open Failed"))
+        self.assertFalse(imds_agent_v2.action_result_is_complete("Propose Failed (Contact must be specified)"))
 
 
 if __name__ == "__main__":
