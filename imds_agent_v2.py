@@ -62,6 +62,8 @@ log = logging.getLogger(__name__)
 # Never hardcode passwords in this file.
 OUTPUT_DIR = os.getenv("IMDS_OUTPUT_DIR", "./imds_output")
 DEFAULT_NUM_ITERATIONS = 10
+DEFAULT_NETWORK_WAIT_MINUTES = 15
+IMDS_HOME_URL = "https://www.mdsystem.com/imdsnt"
 
 
 def resolve_num_iterations(raw: str | None = None) -> int:
@@ -81,6 +83,71 @@ def resolve_num_iterations(raw: str | None = None) -> int:
     if n == 3 and os.getenv("IMDS_ALLOW_THREE") not in {"1", "true", "yes"}:
         return DEFAULT_NUM_ITERATIONS
     return n
+
+
+def network_wait_seconds(raw: str | None = None) -> int:
+    """How long to wait for IMDS after a network drop. Default 15 minutes."""
+    if raw is None:
+        raw = os.getenv("IMDS_NETWORK_WAIT_MINUTES", "")
+    text = str(raw or "").strip()
+    try:
+        minutes = int(text) if text else DEFAULT_NETWORK_WAIT_MINUTES
+    except ValueError:
+        minutes = DEFAULT_NETWORK_WAIT_MINUTES
+    if minutes < 1:
+        minutes = DEFAULT_NETWORK_WAIT_MINUTES
+    return minutes * 60
+
+
+def is_transient_network_error(exc_or_text) -> bool:
+    """True for connectivity / DNS / TLS drops — not a missing IMDS XPath timeout."""
+    text = str(exc_or_text or "").lower()
+    needles = (
+        "net::err",
+        "ns_error_net",
+        "ns_error_unknown_host",
+        "err_internet_disconnected",
+        "err_network_changed",
+        "err_connection",
+        "err_name_not_resolved",
+        "err_address_unreachable",
+        "err_tunnel_connection_failed",
+        "err_socks",
+        "err_proxy",
+        "err_ssl",
+        "err_cert",
+        "econnreset",
+        "econnrefused",
+        "ehostunreach",
+        "enetunreach",
+        "enotfound",
+        "temporary failure in name resolution",
+        "name or service not known",
+        "connection reset",
+        "connection refused",
+        "network is unreachable",
+        "no route to host",
+        "internet disconnected",
+        "err_timed_out",
+        "err_connection_timed_out",
+        "failed to load login page",
+        "chrome-error://",
+    )
+    return any(n in text for n in needles)
+
+
+def action_result_is_complete(action: str) -> bool:
+    """True when Accept/Forward/Propose or Reject already finished for this row."""
+    t = " ".join((action or "").lower().split())
+    if not t or t in {"pending action", "pending"}:
+        return False
+    if t == "rejected" or t.startswith("rejected"):
+        return True
+    if "proposed" in t and "failed" not in t:
+        return True
+    if "accepted, forwarded, proposed" in t:
+        return True
+    return False
 
 
 NUM_ITERATIONS = resolve_num_iterations()
@@ -109,6 +176,9 @@ def load_live_credentials():
     OTP_SECRET = os.environ["OTP_SECRET"]
     NUM_ITERATIONS = resolve_num_iterations()
     log.info(f"Will process up to {NUM_ITERATIONS} MDS rows.")
+    log.info(
+        f"Network drops: wait up to {network_wait_seconds() // 60} min, then re-login and resume."
+    )
     RECIPIENT_IDS = [
         x.strip()
         for x in os.getenv("RECIPIENT_COMPANY_IDS", ",".join(RECIPIENT_IDS)).split(",")
@@ -624,6 +694,77 @@ def on_public_login_page(page) -> bool:
     except Exception:
         return False
     return False
+
+
+def page_looks_offline(page) -> bool:
+    try:
+        url = (page.url or "").lower()
+    except Exception:
+        return True
+    if url in {"", "about:blank"}:
+        return True
+    if "chrome-error" in url or "chromewebdata" in url:
+        return True
+    return False
+
+
+def logged_in_to_imds(page) -> bool:
+    """True when the IMDS app chrome (Inbox) is present."""
+    try:
+        if on_public_login_page(page):
+            return False
+        if page.locator("#pt1\\:pt_ctbToolBarInbound\\:\\:popEl").count() > 0:
+            return True
+        if page.locator("xpath=//*[@id='pt1:pt_ctbToolBarInbound::popEl']").count() > 0:
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def wait_for_connectivity(page, timeout_s: int | None = None) -> bool:
+    """Retry IMDS home until the network returns, up to IMDS_NETWORK_WAIT_MINUTES."""
+    timeout_s = timeout_s if timeout_s is not None else network_wait_seconds()
+    deadline = time.time() + timeout_s
+    attempt = 0
+    log.info(f"Waiting up to {max(1, timeout_s // 60)} min for IMDS to become reachable...")
+    while time.time() < deadline:
+        attempt += 1
+        try:
+            page.goto(IMDS_HOME_URL, wait_until="domcontentloaded", timeout=30000)
+            log.info(f"IMDS reachable again (attempt {attempt}).")
+            return True
+        except Exception as e:
+            left = int(max(0, deadline - time.time()))
+            log.warning(f"IMDS still unreachable ({e}); retrying, {left}s left.")
+            time.sleep(min(20, max(5, left or 5)))
+    log.error("IMDS did not become reachable within the wait window.")
+    return False
+
+
+def ensure_imds_session(page) -> bool:
+    """After a drop, wait for the network, re-login if IMDS expired, return to search."""
+    try:
+        if logged_in_to_imds(page) and not page_looks_offline(page):
+            return True
+    except Exception:
+        pass
+    if not wait_for_connectivity(page):
+        return False
+    if on_public_login_page(page) or not logged_in_to_imds(page):
+        log.info("Re-logging in after network/session drop.")
+        imds_login(page)
+    if not logged_in_to_imds(page):
+        log.warning("Still not logged in after reconnect.")
+        return False
+    navigate_to_search_page(page)
+    return True
+
+
+def recover_after_network_error(page, err=None) -> bool:
+    if err is not None:
+        log.warning(f"Recovering after network/session error: {err}")
+    return ensure_imds_session(page)
 
 # ---------- Dismiss Modal ----------
 def visible_dialog_text(page) -> str:
@@ -3397,11 +3538,19 @@ def accept_passed_mds(page, results):
         if res.get("Overall Result") != "PASS":
             log.info(f"Skipping row {idx+1} (Overall Result: {res['Overall Result']})")
             continue
+        if action_result_is_complete(res.get("Action Result", "")):
+            log.info(f"Skipping row {idx+1} (already {res.get('Action Result')})")
+            continue
 
         mds_id_num = res["MDS ID / Version"].split('/')[0].strip()
         supplier_code = res.get("Supplier Code", "")
         part_no = res.get("Part/Item No.", "")
         log.info(f"Searching for MDS ID: {mds_id_num}")
+        if not logged_in_to_imds(page) or page_looks_offline(page):
+            if not ensure_imds_session(page):
+                res["Action Result"] = "Search Failed"
+                save_check_summary(results)
+                continue
 
         if not search_mds_by_id(page, mds_id_num):
             log.warning(f"Could not search for MDS {mds_id_num}. Skipping this MDS.")
@@ -3493,9 +3642,17 @@ def reject_failed_mds(page, results):
         if res.get("Overall Result") != "FAIL":
             log.info(f"Skipping row {idx+1} (Overall Result is not FAIL)")
             continue
+        if action_result_is_complete(res.get("Action Result", "")):
+            log.info(f"Skipping row {idx+1} (already {res.get('Action Result')})")
+            continue
 
         mds_id_num = res["MDS ID / Version"].split('/')[0].strip()
         log.info(f"Rejecting MDS ID: {mds_id_num}")
+        if not logged_in_to_imds(page) or page_looks_offline(page):
+            if not ensure_imds_session(page):
+                res["Action Result"] = "Search Failed"
+                save_check_summary(results)
+                continue
 
         if not search_mds_by_id(page, mds_id_num):
             log.warning(f"Could not search for MDS {mds_id_num}. Skipping this MDS.")
@@ -3560,7 +3717,9 @@ def return_to_inbox_results(page) -> bool:
 def process_rows_and_export(page):
     results = []
 
-    for i in range(NUM_ITERATIONS):
+    i = 0
+    network_retries = 0
+    while i < NUM_ITERATIONS:
         row_xpath = f"//*[@id='pt1:dcCmds:sfIbLU:pc2:tResult:{i}:cName']"
         log.info(f"Processing MDS row {i+1}/{NUM_ITERATIONS} using XPath: {row_xpath}")
         supplier_code = ""
@@ -3571,8 +3730,12 @@ def process_rows_and_export(page):
             "recyclate_check": "Unknown",
             "biocidal_check": "Unknown",
         }
+        retry_same = False
 
         try:
+            if not logged_in_to_imds(page) or page_looks_offline(page):
+                if not ensure_imds_session(page):
+                    raise RuntimeError("IMDS session could not be restored after a network drop.")
             row_element = page.locator(row_xpath)
             try:
                 row_element.wait_for(state="visible", timeout=10000)
@@ -3689,28 +3852,46 @@ def process_rows_and_export(page):
                 f"Supplier: {supplier_code} | Part: {part_no}"
             )
         except Exception as e:
-            log.warning(f"Row {i+1} failed: {e}. Continuing with remaining rows.")
+            network = is_transient_network_error(e)
             try:
-                save_screenshot(page, f"mds_row_{i+1}_error.png")
+                network = network or page_looks_offline(page) or on_public_login_page(page)
             except Exception:
                 pass
-            results.append({
-                "MDS ID / Version": mds_id,
-                "Check Result": "Check failed",
-                "Parts Marking Check": rule_results.get("parts_marking_check", "Unknown"),
-                "Recyclate Check": rule_results.get("recyclate_check", "Unknown"),
-                "Biocidal Check": rule_results.get("biocidal_check", "Unknown"),
-                "Overall Result": "FAIL",
-                "Supplier Code": supplier_code,
-                "Part/Item No.": part_no,
-                "Action Result": "Row processing Failed",
-            })
+            if network:
+                log.warning(
+                    f"Row {i+1} hit a network/session drop: {e}. "
+                    "Waiting to reconnect, then retrying this row."
+                )
+                if network_retries < 3 and recover_after_network_error(page, e):
+                    network_retries += 1
+                    retry_same = True
+            if not retry_same:
+                log.warning(f"Row {i+1} failed: {e}. Continuing with remaining rows.")
+                try:
+                    save_screenshot(page, f"mds_row_{i+1}_error.png")
+                except Exception:
+                    pass
+                results.append({
+                    "MDS ID / Version": mds_id,
+                    "Check Result": "Check failed",
+                    "Parts Marking Check": rule_results.get("parts_marking_check", "Unknown"),
+                    "Recyclate Check": rule_results.get("recyclate_check", "Unknown"),
+                    "Biocidal Check": rule_results.get("biocidal_check", "Unknown"),
+                    "Overall Result": "FAIL",
+                    "Supplier Code": supplier_code,
+                    "Part/Item No.": part_no,
+                    "Action Result": "Row processing Failed",
+                })
 
+        if retry_same:
+            continue
+        network_retries = 0
         if i < NUM_ITERATIONS - 1:
             if not return_to_inbox_results(page):
                 log.warning(
                     "Could not return to the inbox list; will retry at the start of the next row."
                 )
+        i += 1
 
     save_check_summary(results)
 
@@ -3736,6 +3917,8 @@ def orchestrate():
         browser = p.chromium.launch(headless=True, args=launch_args)
         page = browser.new_page()
         try:
+            if not wait_for_connectivity(page):
+                raise RuntimeError("IMDS is not reachable.")
             imds_login(page)
             navigate_and_filter(page)
             process_rows_and_export(page)
@@ -3743,6 +3926,22 @@ def orchestrate():
             return 0
         except Exception as e:
             log.error(f"Script failed: {e}")
+            network = is_transient_network_error(e)
+            try:
+                network = network or page_looks_offline(page) or on_public_login_page(page)
+            except Exception:
+                pass
+            if network:
+                log.warning("Network/session lost; waiting to reconnect and continuing remaining work.")
+                try:
+                    if recover_after_network_error(page, e):
+                        navigate_and_filter(page)
+                        process_rows_and_export(page)
+                        log.info("All done.")
+                        return 0
+                except Exception as e2:
+                    log.error(f"Script failed after reconnect: {e2}")
+                    e = e2
             try:
                 page.screenshot(path=str(Path(OUTPUT_DIR) / "error.png"))
             except Exception:
