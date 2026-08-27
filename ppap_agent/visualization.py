@@ -138,9 +138,8 @@ def render_graph_html(
 
     return f"""
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
         .ppap-graph {{
-            font-family: 'Inter', sans-serif;
+            font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
             background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
             border-radius: 16px;
             padding: 24px;

@@ -190,8 +190,9 @@ def _dimension_data(scenario: str, part_number: str) -> list[dict]:
     return results
 
 
-def seed_database(db_path: Path) -> dict:
+def seed_database(db_path: Path | str) -> dict:
     """Populate synthetic PPAP data. Returns summary stats."""
+    db_path = Path(db_path)
     conn = init_db(db_path)
     today = date.today()
 

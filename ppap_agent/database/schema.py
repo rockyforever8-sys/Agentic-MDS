@@ -108,9 +108,10 @@ CREATE TABLE IF NOT EXISTS inbox_messages (
 """
 
 
-def init_db(db_path: Path) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+def init_db(db_path: Path | str) -> sqlite3.Connection:
+    path = Path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA_SQL)
     conn.commit()

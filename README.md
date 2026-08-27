@@ -27,7 +27,11 @@ streamlit run ppap_agent/demo_animated.py
 
 ## Google Colab
 
-Open [PPAP_Colab_Start_Here.ipynb](https://colab.research.google.com/github/rockyforever8-sys/Agentic-PPAP/blob/main/PPAP_Colab_Start_Here.ipynb) in Colab, or run:
+Open this notebook (sources live on Agentic-MDS until Agentic-PPAP is published):
+
+[PPAP_Colab_Start_Here.ipynb](https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/cursor/ppap-quality-agent-17d5/PPAP_Colab_Start_Here.ipynb)
+
+Then **Runtime → Run all**. Or paste `colab_paste_ppap.py` into a single Colab cell.
 
 ```python
 %run colab_ppap_demo.py
