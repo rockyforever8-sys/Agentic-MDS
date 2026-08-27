@@ -330,6 +330,62 @@ class CompanyLookupHelpers(unittest.TestCase):
         self.assertTrue(imds_agent_v2.is_passing_check_results_text("Check results - 0 Error(s) / 0 Warning(s)"))
 
 
+class BrowsedAfterNoneFilterTests(unittest.TestCase):
+    def _fn_body(self, name: str) -> str:
+        text = (ROOT / "imds_agent_v2.py").read_text(encoding="utf-8")
+        marker = f"def {name}"
+        self.assertIn(marker, text)
+        return text.split(marker, 1)[1].split("\ndef ", 1)[0]
+
+    def test_original_filter_xpaths_unchanged(self):
+        text = (ROOT / "imds_agent_v2.py").read_text(encoding="utf-8")
+        self.assertIn("XP_FILTER_NONE = \"//*[@id='pt1:dcCmds:sfIbLU:cbNone']/a\"", text)
+        self.assertIn(
+            "XP_FILTER_BROWSED = \"//*[@id='pt1:dcCmds:sfIbLU:sbcBrowsed::content']\"",
+            text,
+        )
+        self.assertIn("XP_COMBINED_ALL = \"//*[@id='pt1:dcCmds:sfIbLU:cbAll']/a\"", text)
+
+    def test_browsed_filter_clicks_none_then_forces_browsed(self):
+        browsed = self._fn_body("set_browsed_filter")
+        none = self._fn_body("_click_status_none")
+        self.assertIn("_click_status_none", browsed)
+        self.assertIn("XP_FILTER_BROWSED", browsed)
+        self.assertIn("Clicked NONE button.", none)
+        self.assertIn("Clicked Browsed checkbox.", browsed + self._fn_body("_click_browsed_control"))
+        self.assertLess(browsed.find("_click_status_none"), browsed.find("XP_FILTER_BROWSED"))
+        # Stale Playwright is_checked() after Combined None must not skip Browsed.
+        self.assertNotIn("Browsed checkbox already checked.", browsed)
+        self.assertNotIn("already checked", browsed.lower())
+        self.assertNotIn("is_checked()", browsed)
+        self.assertIn("_wait_native_checkbox", browsed)
+        self.assertIn("clicking again", browsed.lower())
+
+    def test_already_checked_does_not_skip_browsed_after_none(self):
+        text = (ROOT / "imds_agent_v2.py").read_text(encoding="utf-8")
+        self.assertNotIn("Browsed checkbox already checked.", text)
+        browsed = self._fn_body("set_browsed_filter")
+        # After None, Browsed is always clicked; native input.checked is re-read.
+        self.assertIn("_click_browsed_control", browsed)
+        self.assertIn("_native_checkbox_checked", self._fn_body("_wait_native_checkbox"))
+        native = self._fn_body("_native_checkbox_checked")
+        self.assertIn("input.checked", native)
+
+    def test_all_status_retry_uses_combined_all(self):
+        all_fn = self._fn_body("set_all_status_filter")
+        search_fn = self._fn_body("set_search_filters")
+        self.assertIn("set_search_filters", all_fn)
+        self.assertNotIn("_click_status_none", all_fn)
+        self.assertIn("XP_COMBINED_ALL", search_fn)
+        self.assertIn("Clicked 'All' in Combined filter", search_fn)
+        text = (ROOT / "imds_agent_v2.py").read_text(encoding="utf-8")
+        self.assertIn("retrying with all statuses", text)
+        search_by_id = self._fn_body("search_mds_by_id")
+        self.assertIn("set_browsed_filter", search_by_id)
+        self.assertIn("set_all_status_filter", search_by_id)
+        self.assertLess(search_by_id.find("set_browsed_filter"), search_by_id.find("set_all_status_filter"))
+
+
 class NetworkResumeTests(unittest.TestCase):
     def test_network_wait_default_is_fifteen_minutes(self):
         self.assertEqual(imds_agent_v2.network_wait_seconds(""), 15 * 60)

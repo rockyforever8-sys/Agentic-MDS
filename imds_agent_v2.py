@@ -15,6 +15,10 @@ and mismatches every later row.
 Never JS-strip that dialog.
 Preferred contact is Qu, Theresa; any other real name in the Supplier Data
 dropdown is allowed if Theresa cannot be selected (blank / Please select is not).
+Fixed: after Combined None, wait for ADF then force Browsed on. Do not trust
+Playwright is_checked() after None — it can stay True while every Single
+status is unchecked, so search-by-ID returns 0 rows. All-status retry clicks
+Combined All (never Combined None with zero Single boxes).
 After Forward, IMDS mints a new own-MDS ID (version 0.01). Contact person,
 Add Recipient, and Propose must finish on that new ID before the next
 received MDS is searched.
@@ -3421,37 +3425,100 @@ def _click_status_none(page) -> None:
         log.warning(f"Error clicking NONE button: {e}")
 
 
+def _native_checkbox_checked(page, xpath: str):
+    """Read the DOM input.checked flag. Playwright is_checked() can be stale after ADF None."""
+    try:
+        return page.evaluate(
+            """(xp) => {
+                const node = document.evaluate(
+                    xp, document, null,
+                    XPathResult.FIRST_ORDERED_NODE_TYPE, null
+                ).singleNodeValue;
+                if (!node) return null;
+                const input = (node.matches && node.matches('input'))
+                    ? node
+                    : (node.querySelector ? node.querySelector('input[type="checkbox"]') : null);
+                if (!input) return null;
+                return !!input.checked;
+            }""",
+            xpath,
+        )
+    except Exception:
+        return None
+
+
+def _wait_native_checkbox(page, xpath: str, want_checked: bool, timeout_ms: int = 1500):
+    deadline = time.time() + timeout_ms / 1000.0
+    last = None
+    while time.time() < deadline:
+        last = _native_checkbox_checked(page, xpath)
+        if last is want_checked:
+            return last
+        page.wait_for_timeout(150)
+    return last
+
+
+def _click_browsed_control(page) -> bool:
+    """Click Browsed via the original XPath, then the visible label if needed."""
+    try:
+        browsed_cb = page.locator(f"xpath={XP_FILTER_BROWSED}")
+        if browsed_cb.count() > 0 and browsed_cb.is_visible():
+            browsed_cb.click(force=True)
+            log.info("Clicked Browsed checkbox.")
+            page.wait_for_timeout(400)
+            return True
+        log.warning("Browsed checkbox not found; trying fallback label click.")
+        label = page.locator("label:has-text('Browsed'):visible").first
+        if label.count() > 0 and label.is_visible():
+            label.click(force=True)
+            log.info("Clicked Browsed label as fallback.")
+            page.wait_for_timeout(400)
+            return True
+        log.warning("Browsed label not found either.")
+        return False
+    except Exception as e:
+        log.warning(f"Error clicking Browsed checkbox: {e}")
+        return False
+
+
 def set_all_status_filter(page):
-    """Clear status checkboxes so search-by-ID is not hidden by Browsed-only."""
+    """Retry search-by-ID with Combined All.
+
+    Combined None clears every Single status. Searching in that state
+    returns 0 rows. Prefer Combined All instead of None-with-zero-boxes.
+    """
     log.info("Clearing status filter (all statuses)...")
-    _click_status_none(page)
+    set_search_filters(page)
 
 
 def set_browsed_filter(page):
     log.info("Setting filter to Browsed status only...")
     _click_status_none(page)
-
-    try:
-        browsed_cb = page.locator(f"xpath={XP_FILTER_BROWSED}")
-        if browsed_cb.count() > 0 and browsed_cb.is_visible():
-            is_checked = browsed_cb.is_checked()
-            if not is_checked:
-                browsed_cb.click(force=True)
-                log.info("Clicked Browsed checkbox.")
-            else:
-                log.info("Browsed checkbox already checked.")
-            page.wait_for_timeout(500)
-        else:
-            log.warning("Browsed checkbox not found; trying fallback label click.")
+    # Combined None clears every Single checkbox via ADF. Wait for that
+    # round-trip, then always click Browsed. Do not skip based on a stale
+    # Playwright checked flag after None (that skip searched 1490185359 /
+    # 1484116243 with zero statuses).
+    _wait_native_checkbox(page, XP_FILTER_BROWSED, False, timeout_ms=1500)
+    _click_browsed_control(page)
+    native = _wait_native_checkbox(page, XP_FILTER_BROWSED, True, timeout_ms=1200)
+    if native is not True:
+        log.info("Browsed still unchecked after click; clicking again.")
+        try:
             label = page.locator("label:has-text('Browsed'):visible").first
             if label.count() > 0 and label.is_visible():
                 label.click(force=True)
                 log.info("Clicked Browsed label as fallback.")
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(400)
             else:
-                log.warning("Browsed label not found either.")
-    except Exception as e:
-        log.warning(f"Error clicking Browsed checkbox: {e}")
+                _click_browsed_control(page)
+        except Exception as e:
+            log.warning(f"Error re-clicking Browsed: {e}")
+            _click_browsed_control(page)
+        native = _wait_native_checkbox(page, XP_FILTER_BROWSED, True, timeout_ms=1200)
+    if native is True:
+        log.info("Browsed native input is checked.")
+    else:
+        log.warning("Browsed native input still not checked after Combined None.")
 
 def click_ingredients_tab(page) -> bool:
     """Ingredients tab is where Accept/Forward toolbar icons become active."""
