@@ -61,13 +61,13 @@ log = logging.getLogger(__name__)
 # Login secrets: Colab 🔑 (IMDS_USERNAME, IMDS_PASSWORD, OTP_SECRET) or the environment.
 # Never hardcode passwords in this file.
 OUTPUT_DIR = os.getenv("IMDS_OUTPUT_DIR", "./imds_output")
-DEFAULT_NUM_ITERATIONS = 10
+DEFAULT_NUM_ITERATIONS = 20
 DEFAULT_NETWORK_WAIT_MINUTES = 15
 IMDS_HOME_URL = "https://www.mdsystem.com/imdsnt"
 
 
 def resolve_num_iterations(raw: str | None = None) -> int:
-    """Live default is 10. A leftover Colab/vault value of 3 is treated as unset."""
+    """Live default is 20. Leftover Colab/vault values of 3 or 10 are treated as unset."""
     if raw is None:
         raw = os.getenv("NUM_ITERATIONS", "")
     text = str(raw or "").strip()
@@ -79,8 +79,10 @@ def resolve_num_iterations(raw: str | None = None) -> int:
         return DEFAULT_NUM_ITERATIONS
     if n < 1:
         return DEFAULT_NUM_ITERATIONS
-    # Earlier debug cells and the Drive vault stored 3. Honor any other explicit count.
-    if n == 3 and os.getenv("IMDS_ALLOW_THREE") not in {"1", "true", "yes"}:
+    # Earlier debug cells stored 3; previous live default stored 10.
+    leftover = {3: "IMDS_ALLOW_THREE", 10: "IMDS_ALLOW_TEN"}
+    flag = leftover.get(n)
+    if flag and os.getenv(flag) not in {"1", "true", "yes"}:
         return DEFAULT_NUM_ITERATIONS
     return n
 

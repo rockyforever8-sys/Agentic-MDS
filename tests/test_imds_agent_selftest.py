@@ -38,7 +38,7 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertNotIn("Looking for Yes button.", text)
         self.assertNotIn('locator("input").first.wait_for(state="visible"', text)
         self.assertIn("Action Result", text)
-        self.assertIn("DEFAULT_NUM_ITERATIONS = 10", text)
+        self.assertIn("DEFAULT_NUM_ITERATIONS = 20", text)
         self.assertIn("def resolve_num_iterations", text)
         self.assertIn("def last_lookup_company_frame", text)
         self.assertIn("def close_company_lookup_dialogs", text)
@@ -82,28 +82,36 @@ class OriginalAgentTests(unittest.TestCase):
 
 
 class NumIterationsTests(unittest.TestCase):
-    def test_empty_and_invalid_default_to_ten(self):
-        self.assertEqual(imds_agent_v2.resolve_num_iterations(""), 10)
-        self.assertEqual(imds_agent_v2.resolve_num_iterations("  "), 10)
-        self.assertEqual(imds_agent_v2.resolve_num_iterations("abc"), 10)
-        self.assertEqual(imds_agent_v2.resolve_num_iterations("0"), 10)
-        self.assertEqual(imds_agent_v2.resolve_num_iterations("-1"), 10)
+    def test_empty_and_invalid_default_to_twenty(self):
+        self.assertEqual(imds_agent_v2.resolve_num_iterations(""), 20)
+        self.assertEqual(imds_agent_v2.resolve_num_iterations("  "), 20)
+        self.assertEqual(imds_agent_v2.resolve_num_iterations("abc"), 20)
+        self.assertEqual(imds_agent_v2.resolve_num_iterations("0"), 20)
+        self.assertEqual(imds_agent_v2.resolve_num_iterations("-1"), 20)
 
-    def test_leftover_three_becomes_ten(self):
-        saved = os.environ.pop("IMDS_ALLOW_THREE", None)
+    def test_leftover_three_and_ten_become_twenty(self):
+        saved_three = os.environ.pop("IMDS_ALLOW_THREE", None)
+        saved_ten = os.environ.pop("IMDS_ALLOW_TEN", None)
         try:
-            self.assertEqual(imds_agent_v2.resolve_num_iterations("3"), 10)
+            self.assertEqual(imds_agent_v2.resolve_num_iterations("3"), 20)
+            self.assertEqual(imds_agent_v2.resolve_num_iterations("10"), 20)
             os.environ["IMDS_ALLOW_THREE"] = "1"
             self.assertEqual(imds_agent_v2.resolve_num_iterations("3"), 3)
+            os.environ["IMDS_ALLOW_TEN"] = "1"
+            self.assertEqual(imds_agent_v2.resolve_num_iterations("10"), 10)
         finally:
-            if saved is None:
+            if saved_three is None:
                 os.environ.pop("IMDS_ALLOW_THREE", None)
             else:
-                os.environ["IMDS_ALLOW_THREE"] = saved
+                os.environ["IMDS_ALLOW_THREE"] = saved_three
+            if saved_ten is None:
+                os.environ.pop("IMDS_ALLOW_TEN", None)
+            else:
+                os.environ["IMDS_ALLOW_TEN"] = saved_ten
 
     def test_explicit_counts_are_honored(self):
-        self.assertEqual(imds_agent_v2.resolve_num_iterations("10"), 10)
         self.assertEqual(imds_agent_v2.resolve_num_iterations("20"), 20)
+        self.assertEqual(imds_agent_v2.resolve_num_iterations("30"), 30)
         self.assertEqual(imds_agent_v2.resolve_num_iterations("5"), 5)
 
 
