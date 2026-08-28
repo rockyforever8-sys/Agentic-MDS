@@ -4,25 +4,33 @@ Internal executive briefing on an internally built agentic workflow for IMDS MDS
 
 ## Presentation
 
-- **UI demo video (45s):** [presentations/IMDS_Agentic_Workflow_Demo.mp4](presentations/IMDS_Agentic_Workflow_Demo.mp4)
-- **Live briefing (GitHub Pages):** https://rockyforever8-sys.github.io/Agentic-MDS/
-- **CDN fallback:** https://cdn.jsdelivr.net/gh/rockyforever8-sys/Agentic-MDS@cursor/imds-powerpoint-presentation-07ca/docs/index.html
-- **PowerPoint:** [presentations/IMDS_Agentic_Workflow.pptx](presentations/IMDS_Agentic_Workflow.pptx) or [docs/IMDS_Agentic_Workflow.pptx](docs/IMDS_Agentic_Workflow.pptx)
+C-suite decision briefing with a **storyboard** (eight beats) and a downloadable widescreen PowerPoint.
+
+- **PowerPoint (present this):** [presentations/IMDS_Agentic_Workflow.pptx](presentations/IMDS_Agentic_Workflow.pptx) — open in Microsoft PowerPoint, 16:9. Speaker notes are on every slide.
+- **Same file on Pages:** [docs/IMDS_Agentic_Workflow.pptx](docs/IMDS_Agentic_Workflow.pptx)
 - **PDF:** [docs/IMDS_Agentic_Workflow.pdf](docs/IMDS_Agentic_Workflow.pdf)
+- **Live briefing (GitHub Pages):** https://rockyforever8-sys.github.io/Agentic-MDS/
+- **CDN fallback:** https://cdn.jsdelivr.net/gh/rockyforever8-sys/Agentic-MDS@cursor/imds-c-suite-storyboard-07ca/docs/index.html
+- **UI demo video (45s):** [presentations/IMDS_Agentic_Workflow_Demo.mp4](presentations/IMDS_Agentic_Workflow_Demo.mp4)
 
-Open the `.pptx` in Microsoft PowerPoint (widescreen 16:9) for the meeting. Use the Pages site for browser review. The repo is public; treat the **Internal Confidential** marking as a handling instruction, not access control.
+The repo is public; treat the **Internal Confidential** marking as a handling instruction, not access control.
 
-12 slides, ~20 minutes (+ 1 appendix for Q&A), marked **Internal Confidential**. Presented by the Supplier Quality Director to VP/GM of Operations, Supply Chain, Quality, and HR.
+**Presenter:** Wong (Kam Yuen Wong), Supplier Quality Director / data scientist, Johnson Electric International Limited. **Date:** 27 August 2026. **Length:** 12 slides, ~20 minutes (storyboard + eight beats + Q&A appendix).
 
-Covers:
+Storyboard spine (also slides 2–3 in the deck):
 
-1. Introduction of IMDS (production gate, Rec 001, PPAP)
-2. Supplier roles in tier MDS submission (six inbox actions; GM / VW / Ford overlays)
-3. Daily time and the ~5,000 open MDS backlog
-4. Agentic auto-accept / auto-reject model we will build
-5. Market options as proof — recommendation is to **build**, at zero software spend
+1. Executive Opening — title, hook statistic, urgency
+2. Pain Points — ROI, launch risk, competitiveness of inaction
+3. Proposed Solution — ingest → orchestrate → PASS accept/forward/propose or FAIL reject
+4. Business Impact — manual vs agentic before/after
+5. Budget & ROI — implementation, training, maintenance; payback inside a quarter
+6. Implementation Roadmap — Pilot (20 MDS) → Scale → Optimize, with governance
+7. Case Studies — external / illustrative (not Johnson Electric results)
+8. Call to Action — **Invest in Agentic AI Today.** Approve the 20-MDS pilot and the internal budget line
 
-Speaker notes are timed on every slide.
+Live-agent facts in the solution slides: Colab one-button with Secrets `IMDS_USERNAME`, `IMDS_PASSWORD`, `OTP_SECRET`; default 20 MDS; recipients 9994 and 293798; preferred contact Qu, Theresa with fallback; network-resume; save-changes Yes on same-MDS tabs / No when leaving leftover sheets.
+
+Speaker notes on every slide match the spoken hook and goal. The language is executive sponsorship, emergency halt, and stakeholder alignment — not military jargon.
 
 ## IMDS Colab agent
 
@@ -47,6 +55,6 @@ Live default: **20 MDS** (`NUM_ITERATIONS`). Leftover Colab/vault values of `3` 
 
 ```bash
 pip install -r requirements.txt
-python scripts/build_imds_presentation.py
+python scripts/build_imds_presentation.py --export-docs
 python scripts/build_demo_video.py   # needs ffmpeg; screenshots in docs/demo-steps/
 ```

@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - cursor/imds-powerpoint-presentation-07ca
+      - cursor/imds-c-suite-storyboard-07ca
   workflow_dispatch:
 
 permissions:

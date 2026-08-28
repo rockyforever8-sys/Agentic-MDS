@@ -113,7 +113,7 @@ def end_card() -> Image.Image:
     d.rectangle((0, 0, 18, H), fill=GOLD)
     d.text((80, 380), "Same-day inbox. Zero PPAP delay.", font=font(48, True), fill=WHITE)
     d.text((80, 480), "Green auto-accept  ·  Red auto-reject  ·  Human on novel cases", font=font(26, False), fill=(197, 208, 220))
-    d.text((80, 900), "Endorse the build. Name the owner. Give air cover.", font=font(24, True), fill=GOLD)
+    d.text((80, 900), "Invest in Agentic AI Today. Approve the 20-MDS pilot.", font=font(24, True), fill=GOLD)
     return im
 
 
