@@ -636,6 +636,102 @@ def save_check_summary(results, dest: Path | None = None) -> Path | None:
     log.info(f"Excel summary saved to {dest}")
     return dest
 
+
+def format_duration(seconds) -> str:
+    """Human-readable wall-clock duration, e.g. '36 min 42 s'."""
+    try:
+        total = int(round(float(seconds)))
+    except (TypeError, ValueError):
+        total = 0
+    if total < 0:
+        total = 0
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours} h")
+    if hours or minutes:
+        parts.append(f"{minutes} min")
+    parts.append(f"{secs} s")
+    return " ".join(parts)
+
+
+def format_run_completion_line(n_rows, elapsed_s) -> str:
+    """Colab log line, e.g. 'Completed 20 MDS rows in 36 min 42 s (productivity: ~1.8 min/row).'"""
+    try:
+        n = int(n_rows)
+    except (TypeError, ValueError):
+        n = 0
+    duration = format_duration(elapsed_s)
+    if n > 0:
+        try:
+            per_row_min = float(elapsed_s) / n / 60.0
+        except (TypeError, ValueError):
+            per_row_min = 0.0
+        return (
+            f"Completed {n} MDS rows in {duration} "
+            f"(productivity: ~{per_row_min:.1f} min/row)."
+        )
+    return f"Completed {n} MDS rows in {duration}."
+
+
+def write_run_log(
+    n_rows,
+    elapsed_s,
+    check_s=None,
+    accept_s=None,
+    reject_s=None,
+    dest: Path | None = None,
+) -> Path:
+    """Write imds_output/run_log.md. Duration only — never passwords or OTP."""
+    dest = dest or Path(OUTPUT_DIR) / "run_log.md"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    headline = format_run_completion_line(n_rows, elapsed_s)
+    finished = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    lines = [
+        "# IMDS run log",
+        "",
+        f"Finished (UTC): {finished}",
+        "",
+        headline,
+        "",
+        "## Timing",
+        "",
+        f"- Full run: {format_duration(elapsed_s)}",
+    ]
+    if check_s is not None:
+        lines.append(f"- Check loop: {format_duration(check_s)}")
+    if accept_s is not None:
+        lines.append(f"- Accept / forward / propose: {format_duration(accept_s)}")
+    if reject_s is not None:
+        lines.append(f"- Reject: {format_duration(reject_s)}")
+    lines.append("")
+    dest.write_text("\n".join(lines), encoding="utf-8")
+    log.info(f"Run log saved to {dest}")
+    return dest
+
+
+def publish_run_duration(
+    n_rows,
+    elapsed_s,
+    check_s=None,
+    accept_s=None,
+    reject_s=None,
+    dest: Path | None = None,
+) -> str:
+    """Log the completion line and persist the same words to run_log.md."""
+    headline = format_run_completion_line(n_rows, elapsed_s)
+    log.info(headline)
+    write_run_log(
+        n_rows,
+        elapsed_s,
+        check_s=check_s,
+        accept_s=accept_s,
+        reject_s=reject_s,
+        dest=dest,
+    )
+    return headline
+
 def get_otp():
     return pyotp.TOTP(OTP_SECRET.replace(" ", "").upper()).now()
 
@@ -3957,6 +4053,7 @@ def process_rows_and_export(page):
 
     i = 0
     network_retries = 0
+    t_check = time.monotonic()
     while i < NUM_ITERATIONS:
         row_xpath = f"//*[@id='pt1:dcCmds:sfIbLU:pc2:tResult:{i}:cName']"
         log.info(f"Processing MDS row {i+1}/{NUM_ITERATIONS} using XPath: {row_xpath}")
@@ -4131,15 +4228,26 @@ def process_rows_and_export(page):
                 )
         i += 1
 
+    check_s = time.monotonic() - t_check
     save_check_summary(results)
 
     # Process PASS MDSs
+    t_accept = time.monotonic()
     accept_passed_mds(page, results)
+    accept_s = time.monotonic() - t_accept
 
     # Process FAIL MDSs
+    t_reject = time.monotonic()
     reject_failed_mds(page, results)
+    reject_s = time.monotonic() - t_reject
 
     save_check_summary(results)
+    return {
+        "n_rows": len(results),
+        "check_s": check_s,
+        "accept_s": accept_s,
+        "reject_s": reject_s,
+    }
 
 # ---------- Orchestration ----------
 def orchestrate():
@@ -4154,12 +4262,20 @@ def orchestrate():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=launch_args)
         page = browser.new_page()
+        t0 = time.monotonic()
         try:
             if not wait_for_connectivity(page):
                 raise RuntimeError("IMDS is not reachable.")
             imds_login(page)
             navigate_and_filter(page)
-            process_rows_and_export(page)
+            timings = process_rows_and_export(page) or {}
+            publish_run_duration(
+                timings.get("n_rows", 0),
+                time.monotonic() - t0,
+                check_s=timings.get("check_s"),
+                accept_s=timings.get("accept_s"),
+                reject_s=timings.get("reject_s"),
+            )
             log.info("All done.")
             return 0
         except Exception as e:
@@ -4174,7 +4290,14 @@ def orchestrate():
                 try:
                     if recover_after_network_error(page, e):
                         navigate_and_filter(page)
-                        process_rows_and_export(page)
+                        timings = process_rows_and_export(page) or {}
+                        publish_run_duration(
+                            timings.get("n_rows", 0),
+                            time.monotonic() - t0,
+                            check_s=timings.get("check_s"),
+                            accept_s=timings.get("accept_s"),
+                            reject_s=timings.get("reject_s"),
+                        )
                         log.info("All done.")
                         return 0
                 except Exception as e2:

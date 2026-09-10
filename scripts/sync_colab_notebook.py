@@ -65,7 +65,7 @@ Preferred contact is **Qu, Theresa**. If that name is missing from Supplier Data
 
 Received MDSs search clicks Combined **None** then forces **Browsed** on (Playwright must not skip a stale “already checked” after None). All-status retry uses Combined **All**.
 
-Then click **Run IMDS until complete**. Output: `imds_output/check_summary.xlsx`.""",
+Then click **Run IMDS until complete**. Output: `imds_output/check_summary.xlsx` and `imds_output/run_log.md` (wall-clock duration for the 20-MDS run).""",
             "md-intro",
         ),
         code_cell(
