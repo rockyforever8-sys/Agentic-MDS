@@ -71,6 +71,19 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertNotIn('page.frame_locator("iframe[src*=\'lookupCompany\']")', text)
         self.assertNotIn("Fallback: using first visible iframe.", text)
         self.assertNotIn('wait_for_selector("table:has-text(\'Message\')"', text)
+        self.assertIn("def imds_chrome_present", text)
+        self.assertIn("def wait_for_imds_chrome", text)
+        self.assertIn("def session_logged_in_after_reconnect", text)
+        self.assertIn("def should_wait_for_network_recovery", text)
+        self.assertIn("waiting for Received MDSs / MDS menu", text)
+        self.assertIn("could not navigate to search page", text)
+        inbox_fn = text.split("def _click_inbox_mds", 1)[1].split("\ndef navigate_to_search_page", 1)[0]
+        self.assertNotIn("go_back()", inbox_fn)
+        self.assertNotIn("trying to go back", inbox_fn)
+        nav_fn = text.split("def navigate_to_search_page", 1)[1].split("\ndef navigate_and_filter", 1)[0]
+        self.assertNotIn("go_back()", nav_fn)
+        self.assertIn("wait_for_imds_chrome", nav_fn)
+        self.assertIn("logged_in_to_imds", nav_fn)
 
     def test_load_live_credentials_requires_secrets(self):
         saved = {k: os.environ.pop(k, None) for k in ("IMDS_USERNAME", "IMDS_PASSWORD", "OTP_SECRET", "IMDS_MASTER_KEY")}
@@ -398,6 +411,18 @@ class NetworkResumeTests(unittest.TestCase):
         self.assertTrue(imds_agent_v2.is_transient_network_error("Failed to load login page: Timeout"))
         self.assertFalse(imds_agent_v2.is_transient_network_error("Timeout 15000ms exceeded."))
         self.assertFalse(imds_agent_v2.is_transient_network_error("Row 6 not found"))
+        self.assertFalse(imds_agent_v2.is_transient_network_error("Could not navigate to search page"))
+        self.assertFalse(
+            imds_agent_v2.should_wait_for_network_recovery("Could not navigate to search page")
+        )
+        self.assertFalse(
+            imds_agent_v2.should_wait_for_network_recovery(
+                RuntimeError("Could not navigate to search page")
+            )
+        )
+        self.assertTrue(
+            imds_agent_v2.should_wait_for_network_recovery("net::ERR_INTERNET_DISCONNECTED")
+        )
 
     def test_action_result_is_complete(self):
         self.assertTrue(imds_agent_v2.action_result_is_complete("Accepted, forwarded, proposed"))
@@ -405,6 +430,126 @@ class NetworkResumeTests(unittest.TestCase):
         self.assertFalse(imds_agent_v2.action_result_is_complete("Pending action"))
         self.assertFalse(imds_agent_v2.action_result_is_complete("Open Failed"))
         self.assertFalse(imds_agent_v2.action_result_is_complete("Propose Failed (Contact must be specified)"))
+
+
+class _FakeLocator:
+    def __init__(self, n: int, visible: bool):
+        self._n = n
+        self._visible = visible
+        self.first = self
+
+    def count(self) -> int:
+        return self._n
+
+    def is_visible(self) -> bool:
+        return bool(self._visible and self._n > 0)
+
+    def locator(self, selector: str):
+        return _FakeLocator(0, False)
+
+
+class FakeImdsPage:
+    """Minimal Playwright page stand-in for login/chrome detectors."""
+
+    def __init__(self, present=(), url="https://www.mdsystem.com/imdsnt"):
+        self.present = set(present)
+        self.url = url
+
+    def wait_for_timeout(self, _ms: int):
+        return None
+
+    def locator(self, selector: str):
+        sel = selector or ""
+        sel_l = sel.lower()
+        key = None
+        if "pt_ctbtoolbarinbound" in sel_l and "menu" not in sel_l:
+            key = "inbox"
+        elif "pt_cmisearchinboxb" in sel_l:
+            key = "inbox"
+        elif "sdiinboxsearch" in sel_l:
+            key = "received_menu"
+        elif "received mdss" in sel_l:
+            key = "received_link"
+        elif "pt_mfile" in sel_l:
+            key = "mds_menu"
+        elif "johnson electric" in sel_l:
+            key = "org"
+        elif "user id forgotten" in sel_l:
+            key = "forgotten"
+        elif "username" in sel_l or "userid" in sel_l.replace(" ", ""):
+            key = "username"
+        elif "user id" in sel_l:
+            key = "user_id_label"
+        elif "button:has-text('login')" in sel_l or (
+            "input[value" in sel_l and "login" in sel_l
+        ):
+            key = "login_button"
+        elif "a:has-text('login')" in sel_l:
+            key = "login_link"
+        hit = key in self.present if key else False
+        return _FakeLocator(1 if hit else 0, hit)
+
+
+class PostLoginSessionTests(unittest.TestCase):
+    def test_post_login_page_is_not_public_login(self):
+        leftover_login = FakeImdsPage(
+            present=("inbox", "login_link", "username"),
+            url="https://www.mdsystem.com/imdsnt/faces/login",
+        )
+        self.assertFalse(imds_agent_v2.on_public_login_page(leftover_login))
+        self.assertTrue(imds_agent_v2.logged_in_to_imds(leftover_login))
+
+        splash = FakeImdsPage(
+            present=("org", "received_link", "login_link", "username", "forgotten"),
+            url="https://www.mdsystem.com/imdsnt?login=1",
+        )
+        self.assertFalse(imds_agent_v2.on_public_login_page(splash))
+        self.assertTrue(imds_agent_v2.logged_in_to_imds(splash))
+
+        login_link_only = FakeImdsPage(present=("login_link",))
+        self.assertFalse(imds_agent_v2.on_public_login_page(login_link_only))
+
+    def test_logged_in_when_mds_or_inbox_chrome_present(self):
+        inbox = FakeImdsPage(present=("inbox", "login_button"))
+        self.assertTrue(imds_agent_v2.imds_chrome_present(inbox))
+        self.assertTrue(imds_agent_v2.logged_in_to_imds(inbox))
+        self.assertFalse(imds_agent_v2.on_public_login_page(inbox))
+
+        mds_menu = FakeImdsPage(present=("mds_menu",))
+        self.assertTrue(imds_agent_v2.logged_in_to_imds(mds_menu))
+
+        received = FakeImdsPage(present=("received_menu",))
+        self.assertTrue(imds_agent_v2.logged_in_to_imds(received))
+
+        public = FakeImdsPage(present=("username", "login_button", "forgotten", "login_link"))
+        self.assertTrue(imds_agent_v2.on_public_login_page(public))
+        self.assertFalse(imds_agent_v2.logged_in_to_imds(public))
+
+    def test_reconnect_login_success_is_not_still_logged_out(self):
+        settling = FakeImdsPage(present=("login_link",))
+        self.assertFalse(imds_agent_v2.logged_in_to_imds(settling))
+        self.assertTrue(
+            imds_agent_v2.session_logged_in_after_reconnect(settling, login_succeeded=True)
+        )
+        self.assertFalse(
+            imds_agent_v2.session_logged_in_after_reconnect(settling, login_succeeded=False)
+        )
+
+    def test_leftover_three_and_ten_still_twenty_rows(self):
+        saved_three = os.environ.pop("IMDS_ALLOW_THREE", None)
+        saved_ten = os.environ.pop("IMDS_ALLOW_TEN", None)
+        try:
+            self.assertEqual(imds_agent_v2.resolve_num_iterations("3"), 20)
+            self.assertEqual(imds_agent_v2.resolve_num_iterations("10"), 20)
+        finally:
+            if saved_three is None:
+                os.environ.pop("IMDS_ALLOW_THREE", None)
+            else:
+                os.environ["IMDS_ALLOW_THREE"] = saved_three
+            if saved_ten is None:
+                os.environ.pop("IMDS_ALLOW_TEN", None)
+            else:
+                os.environ["IMDS_ALLOW_TEN"] = saved_ten
 
 
 class DurationLogTests(unittest.TestCase):

@@ -145,6 +145,14 @@ def is_transient_network_error(exc_or_text) -> bool:
     return any(n in text for n in needles)
 
 
+def should_wait_for_network_recovery(exc_or_text) -> bool:
+    """True only for connectivity / DNS / TLS drops — never search-page navigation failure."""
+    text = str(exc_or_text or "")
+    if "could not navigate to search page" in text.lower():
+        return False
+    return is_transient_network_error(text)
+
+
 def action_result_is_complete(action: str) -> bool:
     """True when Accept/Forward/Propose or Reject already finished for this row."""
     t = " ".join((action or "").lower().split())
@@ -828,21 +836,81 @@ def imds_login(page):
         raise RuntimeError("Login failed.")
     log.info("Login successful.")
     save_screenshot(page, "01_after_login.png")
+    wait_for_imds_chrome(page)
+
+
+def _sel_count(page, selector: str) -> int:
+    try:
+        return int(page.locator(selector).count() or 0)
+    except Exception:
+        return 0
+
+
+def _sel_visible(page, selector: str) -> bool:
+    try:
+        loc = page.locator(selector).first
+        return loc.count() > 0 and loc.is_visible()
+    except Exception:
+        return False
+
+
+def imds_chrome_present(page) -> bool:
+    """True when post-login IMDS chrome is in the DOM, even if a login node remains."""
+    chrome_selectors = (
+        "#pt1\\:pt_ctbToolBarInbound\\:\\:popEl",
+        "xpath=//*[@id='pt1:pt_ctbToolBarInbound::popEl']",
+        "#pt1\\:pt_cmiSearchInboxB",
+        f"xpath={XP_RECEIVED_MDS_MENU}",
+        f"xpath={XP_MDS_MENU}",
+        "xpath=//*[@id='pt1:pt_mFile']",
+        "a:has-text('Received MDSs')",
+        "text=Johnson Electric",
+        "text=Received MDSs",
+    )
+    return any(_sel_count(page, sel) > 0 for sel in chrome_selectors)
+
+
+def wait_for_imds_chrome(page, timeout_ms: int = 20000) -> bool:
+    """Wait for Inbox / Received MDSs / org chrome after login or a splash page."""
+    deadline = time.time() + max(1, timeout_ms) / 1000.0
+    while time.time() < deadline:
+        if imds_chrome_present(page):
+            return True
+        try:
+            page.wait_for_timeout(500)
+        except Exception:
+            time.sleep(0.4)
+    return imds_chrome_present(page)
 
 
 def on_public_login_page(page) -> bool:
-    """True on the unauthenticated IMDS landing page (Login link, no Inbox)."""
+    """True only when User ID / Login form controls are the active UI.
+
+    Leftover Login links, URL substrings, or screenshot names must not count.
+    Post-login chrome wins even if a login form node is still in the DOM.
+    """
     try:
-        has_inbox = page.locator("#pt1\\:pt_ctbToolBarInbound\\:\\:popEl").count() > 0
-        if has_inbox:
+        if imds_chrome_present(page):
             return False
-        login_link = page.locator("a:has-text('Login'):visible").first
-        forgotten = page.locator("text=User ID forgotten")
-        if login_link.count() > 0 and (forgotten.count() > 0 or not has_inbox):
-            return login_link.is_visible()
+        user_id_active = (
+            _sel_visible(page, "#username")
+            or _sel_visible(page, "input[name='username']")
+            or _sel_visible(page, "input[id='username']")
+            or _sel_visible(page, "label:has-text('User ID')")
+            or _sel_visible(page, "text=User ID forgotten")
+        )
+        login_form_control = (
+            _sel_visible(page, "button:has-text('Login')")
+            or _sel_visible(page, "input[value='Login']")
+            or _sel_visible(page, "input[value*='Login']")
+        )
+        # Public landing: Login *link* only counts together with User ID help/form.
+        landing_login_link = _sel_visible(page, "a:has-text('Login')")
+        if user_id_active and (login_form_control or landing_login_link):
+            return True
+        return False
     except Exception:
         return False
-    return False
 
 
 def page_looks_offline(page) -> bool:
@@ -858,17 +926,25 @@ def page_looks_offline(page) -> bool:
 
 
 def logged_in_to_imds(page) -> bool:
-    """True when the IMDS app chrome (Inbox) is present."""
+    """True when post-login chrome is present, even if a login form node remains."""
     try:
+        if imds_chrome_present(page):
+            return True
         if on_public_login_page(page):
             return False
-        if page.locator("#pt1\\:pt_ctbToolBarInbound\\:\\:popEl").count() > 0:
-            return True
-        if page.locator("xpath=//*[@id='pt1:pt_ctbToolBarInbound::popEl']").count() > 0:
-            return True
     except Exception:
         return False
     return False
+
+
+def session_logged_in_after_reconnect(page, login_succeeded: bool = False) -> bool:
+    """After reconnect, a successful login counts even while chrome is still settling."""
+    try:
+        if logged_in_to_imds(page):
+            return True
+    except Exception:
+        pass
+    return bool(login_succeeded)
 
 
 def wait_for_connectivity(page, timeout_s: int | None = None) -> bool:
@@ -900,14 +976,18 @@ def ensure_imds_session(page) -> bool:
         pass
     if not wait_for_connectivity(page):
         return False
+    wait_for_imds_chrome(page)
+    login_succeeded = False
     if on_public_login_page(page) or not logged_in_to_imds(page):
         log.info("Re-logging in after network/session drop.")
         imds_login(page)
-    if not logged_in_to_imds(page):
-        log.warning("Still not logged in after reconnect.")
-        return False
-    navigate_to_search_page(page)
-    return True
+        login_succeeded = True
+    wait_for_imds_chrome(page)
+    if session_logged_in_after_reconnect(page, login_succeeded):
+        navigate_to_search_page(page)
+        return True
+    log.warning("Still not logged in after reconnect.")
+    return False
 
 
 def recover_after_network_error(page, err=None) -> bool:
@@ -1433,106 +1513,147 @@ def dismiss_modal(page, allow_escape: bool = True, save_changes: str = "yes"):
     return False
 
 # ---------- Navigate to Search Page ----------
+def _search_id_field_ready(page) -> bool:
+    try:
+        return page.locator(f"xpath={XP_ID_FIELD}").count() > 0
+    except Exception:
+        return False
+
+
+def _click_received_mds_link(page) -> bool:
+    received_mds_link = page.locator("a:has-text('Received MDSs'):visible").first
+    if received_mds_link.count() == 0 or not received_mds_link.is_visible():
+        return False
+    received_mds_link.click()
+    log.info("Clicked 'Received MDSs' link.")
+    page.wait_for_timeout(800)
+    dismiss_modal(page, allow_escape=False, save_changes="no")
+    wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False, save_changes="no")
+    page.wait_for_load_state("networkidle", timeout=15000)
+    page.wait_for_timeout(1500)
+    if _search_id_field_ready(page):
+        log.info("Successfully navigated to search page via Received MDSs link.")
+        return True
+    if modal_dialog_visible(page):
+        dismiss_modal(page, allow_escape=False, save_changes="no")
+        received_mds_link = page.locator("a:has-text('Received MDSs'):visible").first
+        if received_mds_link.count() > 0:
+            received_mds_link.click()
+            page.wait_for_timeout(2000)
+            if _search_id_field_ready(page):
+                log.info("Successfully navigated to search page after dismissing save-changes.")
+                return True
+    return _search_id_field_ready(page)
+
+
+def _click_received_mds_menu(page) -> bool:
+    back_btn = page.locator(f"xpath={XP_RECEIVED_MDS_MENU}")
+    if back_btn.count() == 0 or not back_btn.is_visible():
+        return False
+    back_btn.click(force=True)
+    log.info("Clicked MDS Request tab (back).")
+    dismiss_modal(page, allow_escape=False, save_changes="no")
+    wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False, save_changes="no")
+    page.wait_for_load_state("networkidle", timeout=15000)
+    page.wait_for_timeout(2000)
+    if _search_id_field_ready(page):
+        log.info("Successfully navigated to search page via back button.")
+        return True
+    return False
+
+
+def _click_inbox_mds(page) -> bool:
+    inbox_btn = page.locator("#pt1\\:pt_ctbToolBarInbound\\:\\:popEl")
+    if inbox_btn.count() == 0:
+        inbox_btn = page.locator("//*[@id='pt1:pt_ctbToolBarInbound::popEl']")
+    if inbox_btn.count() > 0 and inbox_btn.is_visible():
+        inbox_btn.click()
+        page.wait_for_timeout(1500)
+        log.info("Clicked Inbox button")
+    else:
+        log.warning("Inbox button not found; waiting for Received MDSs / MDS menu.")
+        return False
+
+    mds_item = page.locator("#pt1\\:pt_cmiSearchInboxB")
+    if mds_item.count() == 0:
+        dropdown = page.locator("#pt1\\:pt_ctbToolBarInbound_Menu\\:\\:menu")
+        if dropdown.count() > 0:
+            mds_item = dropdown.locator("a:has-text('MDS'):visible, li:has-text('MDS'):visible").first
+    if mds_item.count() > 0 and mds_item.is_visible():
+        mds_item.click()
+        page.wait_for_load_state("networkidle", timeout=15000)
+        page.wait_for_timeout(2000)
+        log.info("Clicked 'MDS' from Inbox dropdown")
+    else:
+        log.warning("MDS item not found; waiting before retrying search navigation.")
+        return False
+
+    try:
+        page.wait_for_selector(f"xpath={XP_ID_FIELD}", timeout=10000)
+        log.info("Successfully navigated to search page via Inbox.")
+        return True
+    except Exception as e:
+        log.warning(f"Search page not reached (ID field missing): {e}")
+        return False
+
+
 def navigate_to_search_page(page):
     log.info("Navigating to Received MDSs search page...")
     close_check_results_dialog(page)
     close_company_lookup_dialogs(page)
-    if on_public_login_page(page):
+    wait_for_imds_chrome(page)
+    # After a confirmed login, leftover Login DOM must not force a second OTP.
+    if on_public_login_page(page) and not logged_in_to_imds(page):
         log.warning("Session is on the public login page; logging in again.")
         imds_login(page)
+        wait_for_imds_chrome(page)
     for _ in range(4):
         dismiss_modal(page, allow_escape=False, save_changes="no")
         page.wait_for_timeout(400)
         if not modal_dialog_visible(page):
             break
 
-    try:
-        received_mds_link = page.locator("a:has-text('Received MDSs'):visible").first
-        if received_mds_link.count() > 0 and received_mds_link.is_visible():
-            received_mds_link.click()
-            log.info("Clicked 'Received MDSs' link.")
-            page.wait_for_timeout(800)
-            dismiss_modal(page, allow_escape=False, save_changes="no")
-            wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False, save_changes="no")
-            page.wait_for_load_state("networkidle", timeout=15000)
-            page.wait_for_timeout(1500)
-            if page.locator(f"xpath={XP_ID_FIELD}").count() > 0:
-                log.info("Successfully navigated to search page via Received MDSs link.")
-                return True
-            if modal_dialog_visible(page):
-                dismiss_modal(page, allow_escape=False, save_changes="no")
-                received_mds_link = page.locator("a:has-text('Received MDSs'):visible").first
-                if received_mds_link.count() > 0:
-                    received_mds_link.click()
-                    page.wait_for_timeout(2000)
-                    if page.locator(f"xpath={XP_ID_FIELD}").count() > 0:
-                        log.info("Successfully navigated to search page after dismissing save-changes.")
-                        return True
-    except Exception as e:
-        log.warning(f"Error clicking Received MDSs link: {e}")
-
-    try:
-        back_btn = page.locator(f"xpath={XP_RECEIVED_MDS_MENU}")
-        if back_btn.count() > 0 and back_btn.is_visible():
-            back_btn.click(force=True)
-            log.info("Clicked MDS Request tab (back).")
-            dismiss_modal(page, allow_escape=False, save_changes="no")
-            wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False, save_changes="no")
-            page.wait_for_load_state("networkidle", timeout=15000)
-            page.wait_for_timeout(2000)
-            if page.locator(f"xpath={XP_ID_FIELD}").count() > 0:
-                log.info("Successfully navigated to search page via back button.")
-                return True
-    except Exception as e:
-        log.warning(f"Error using back button: {e}")
-
-    try:
-        inbox_btn = page.locator("#pt1\\:pt_ctbToolBarInbound\\:\\:popEl")
-        if inbox_btn.count() == 0:
-            inbox_btn = page.locator("//*[@id='pt1:pt_ctbToolBarInbound::popEl']")
-        if inbox_btn.count() > 0 and inbox_btn.is_visible():
-            inbox_btn.click()
-            page.wait_for_timeout(1500)
-            log.info("Clicked Inbox button")
-        else:
-            log.warning("Inbox button not found; trying to go back.")
-            page.go_back()
-            page.wait_for_timeout(2000)
-
-        mds_item = page.locator("#pt1\\:pt_cmiSearchInboxB")
-        if mds_item.count() == 0:
-            dropdown = page.locator("#pt1\\:pt_ctbToolBarInbound_Menu\\:\\:menu")
-            if dropdown.count() > 0:
-                mds_item = dropdown.locator("a:has-text('MDS'):visible, li:has-text('MDS'):visible").first
-        if mds_item.count() > 0 and mds_item.is_visible():
-            mds_item.click()
-            page.wait_for_load_state("networkidle", timeout=15000)
-            page.wait_for_timeout(2000)
-            log.info("Clicked 'MDS' from Inbox dropdown")
-        else:
-            log.warning("MDS item not found; navigating to search page failed.")
-            return False
-
+    for attempt in range(1, 5):
         try:
-            page.wait_for_selector(f"xpath={XP_ID_FIELD}", timeout=10000)
-            log.info("Successfully navigated to search page via Inbox.")
-            return True
+            if _click_received_mds_link(page):
+                return True
         except Exception as e:
-            log.warning(f"Search page not reached (ID field missing): {e}")
-            return False
-    except Exception as e:
-        log.warning(f"Error navigating to search page via Inbox: {e}")
+            log.warning(f"Error clicking Received MDSs link: {e}")
+        try:
+            if _click_received_mds_menu(page):
+                return True
+        except Exception as e:
+            log.warning(f"Error using back button: {e}")
+        try:
+            if _click_inbox_mds(page):
+                return True
+        except Exception as e:
+            log.warning(f"Error navigating to search page via Inbox: {e}")
+        log.info(f"Search page not ready yet (attempt {attempt}/4); waiting for IMDS chrome...")
+        wait_for_imds_chrome(page, timeout_ms=8000)
+        try:
+            page.wait_for_timeout(1000)
+        except Exception:
+            time.sleep(0.5)
 
     log.info("All navigation methods failed; reloading main page and retrying...")
     try:
-        if on_public_login_page(page):
+        if on_public_login_page(page) and not logged_in_to_imds(page):
             imds_login(page)
+            wait_for_imds_chrome(page)
         else:
             page.goto("https://www.mdsystem.com/imdsnt")
             page.wait_for_load_state("networkidle", timeout=30000)
             page.wait_for_timeout(3000)
-            if on_public_login_page(page):
+            wait_for_imds_chrome(page)
+            if on_public_login_page(page) and not logged_in_to_imds(page):
                 imds_login(page)
+                wait_for_imds_chrome(page)
+        try:
+            if _click_received_mds_link(page) or _click_received_mds_menu(page):
+                return True
+        except Exception as e:
+            log.warning(f"Error clicking Received MDSs after reload: {e}")
         inbox_btn = page.locator("#pt1\\:pt_ctbToolBarInbound\\:\\:popEl")
         if inbox_btn.count() == 0:
             inbox_btn = page.locator("//*[@id='pt1:pt_ctbToolBarInbound::popEl']")
@@ -1548,7 +1669,7 @@ def navigate_to_search_page(page):
                 mds_item.click()
                 page.wait_for_load_state("networkidle", timeout=15000)
                 page.wait_for_timeout(2000)
-                if page.locator(f"xpath={XP_ID_FIELD}").count() > 0:
+                if _search_id_field_ready(page):
                     log.info("Successfully navigated to search page after reload.")
                     return True
     except Exception as e:
@@ -4187,11 +4308,7 @@ def process_rows_and_export(page):
                 f"Supplier: {supplier_code} | Part: {part_no}"
             )
         except Exception as e:
-            network = is_transient_network_error(e)
-            try:
-                network = network or page_looks_offline(page) or on_public_login_page(page)
-            except Exception:
-                pass
+            network = should_wait_for_network_recovery(e)
             if network:
                 log.warning(
                     f"Row {i+1} hit a network/session drop: {e}. "
@@ -4280,11 +4397,7 @@ def orchestrate():
             return 0
         except Exception as e:
             log.error(f"Script failed: {e}")
-            network = is_transient_network_error(e)
-            try:
-                network = network or page_looks_offline(page) or on_public_login_page(page)
-            except Exception:
-                pass
+            network = should_wait_for_network_recovery(e)
             if network:
                 log.warning("Network/session lost; waiting to reconnect and continuing remaining work.")
                 try:
