@@ -67,7 +67,7 @@ Received MDSs search clicks Combined **None** then forces **Browsed** on (Playwr
 
 After **Login successful**, wait for IMDS chrome and open **Received MDSs** / Inbox — leftover Login DOM is not a public login page and must not burn a second OTP.
 
-Then click **Run IMDS until complete**. Output: `imds_output/check_summary.xlsx` and `imds_output/run_log.md` (wall-clock duration for the 20-MDS run).""",
+Then click **Run IMDS until complete**. Output: `imds_output/check_summary.xlsx`.""",
             "md-intro",
         ),
         code_cell(

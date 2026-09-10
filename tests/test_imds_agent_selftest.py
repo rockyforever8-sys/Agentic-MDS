@@ -552,57 +552,5 @@ class PostLoginSessionTests(unittest.TestCase):
                 os.environ["IMDS_ALLOW_TEN"] = saved_ten
 
 
-class DurationLogTests(unittest.TestCase):
-    def test_format_duration_words(self):
-        self.assertEqual(imds_agent_v2.format_duration(2202), "36 min 42 s")
-        self.assertEqual(imds_agent_v2.format_duration(45), "45 s")
-        self.assertEqual(imds_agent_v2.format_duration(60), "1 min 0 s")
-        self.assertEqual(imds_agent_v2.format_duration(3661), "1 h 1 min 1 s")
-        self.assertEqual(imds_agent_v2.format_duration(0), "0 s")
-        self.assertEqual(imds_agent_v2.format_duration(-3), "0 s")
-        self.assertEqual(imds_agent_v2.format_duration("2202"), "36 min 42 s")
-
-    def test_completion_line_matches_example(self):
-        self.assertEqual(
-            imds_agent_v2.format_run_completion_line(20, 2202),
-            "Completed 20 MDS rows in 36 min 42 s (productivity: ~1.8 min/row).",
-        )
-        self.assertEqual(
-            imds_agent_v2.format_run_completion_line(0, 12),
-            "Completed 0 MDS rows in 12 s.",
-        )
-
-    def test_write_run_log_markdown(self):
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmp:
-            dest = Path(tmp) / "run_log.md"
-            path = imds_agent_v2.write_run_log(
-                20, 2202, check_s=1200, accept_s=800, reject_s=202, dest=dest
-            )
-            self.assertEqual(path, dest)
-            text = path.read_text(encoding="utf-8")
-            self.assertIn("Completed 20 MDS rows in 36 min 42 s (productivity: ~1.8 min/row).", text)
-            self.assertIn("Check loop", text)
-            self.assertIn("Accept / forward / propose", text)
-            self.assertIn("Reject", text)
-            self.assertIn("20 min 0 s", text)
-            self.assertNotIn("IMDS_PASSWORD", text)
-            self.assertNotIn("OTP_SECRET", text)
-            self.assertNotIn("password", text.lower())
-
-    def test_source_publishes_run_log_md(self):
-        text = (ROOT / "imds_agent_v2.py").read_text(encoding="utf-8")
-        self.assertIn("def format_duration", text)
-        self.assertIn("def format_run_completion_line", text)
-        self.assertIn("def write_run_log", text)
-        self.assertIn("def publish_run_duration", text)
-        self.assertIn("run_log.md", text)
-        self.assertIn("productivity:", text)
-        self.assertIn("t_check = time.monotonic()", text)
-        self.assertIn("t_accept = time.monotonic()", text)
-        self.assertIn("t_reject = time.monotonic()", text)
-
-
 if __name__ == "__main__":
     unittest.main()
