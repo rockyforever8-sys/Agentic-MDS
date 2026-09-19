@@ -6,6 +6,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -87,10 +88,19 @@ class OriginalAgentTests(unittest.TestCase):
         inbox_fn = text.split("def _click_inbox_mds", 1)[1].split("\ndef navigate_to_search_page", 1)[0]
         self.assertNotIn("go_back()", inbox_fn)
         self.assertNotIn("trying to go back", inbox_fn)
-        nav_fn = text.split("def navigate_to_search_page", 1)[1].split("\ndef navigate_and_filter", 1)[0]
+        nav_fn = text.split("def navigate_to_search_page", 1)[1].split("\ndef apply_not_yet_browsed_filter_and_search", 1)[0]
         self.assertNotIn("go_back()", nav_fn)
         self.assertIn("wait_for_imds_chrome", nav_fn)
         self.assertIn("logged_in_to_imds", nav_fn)
+        self.assertIn("Inbox missing; retrying Received MDSs", nav_fn)
+        ret_fn = text.split("def return_to_inbox_results", 1)[1].split("\ndef process_rows_and_export", 1)[0]
+        self.assertNotIn("go_back()", ret_fn)
+        self.assertIn("_click_received_mds_link", ret_fn)
+        self.assertIn("def recover_inbox_list", text)
+        self.assertIn("def apply_not_yet_browsed_filter_and_search", text)
+        self.assertIn("def ensure_ingredients_ready_for_check", text)
+        self.assertIn("def is_searchable_mds_id", text)
+        self.assertIn("Not searching invalid MDS ID", text)
 
     def test_load_live_credentials_requires_secrets(self):
         saved = {k: os.environ.pop(k, None) for k in ("IMDS_USERNAME", "IMDS_PASSWORD", "OTP_SECRET", "IMDS_MASTER_KEY")}
@@ -448,6 +458,26 @@ class NetworkResumeTests(unittest.TestCase):
                 RuntimeError("Could not navigate to search page")
             )
         )
+        self.assertFalse(
+            imds_agent_v2.should_wait_for_network_recovery(
+                "Failed to navigate to search page after all attempts."
+            )
+        )
+        self.assertFalse(
+            imds_agent_v2.should_wait_for_network_recovery("Could not return to the inbox list")
+        )
+        self.assertFalse(
+            imds_agent_v2.should_wait_for_network_recovery(
+                "Inbox button not found; waiting for Received MDSs / MDS menu."
+            )
+        )
+        self.assertFalse(
+            imds_agent_v2.should_wait_for_network_recovery("Search page not ready yet (attempt 1/4)")
+        )
+        self.assertFalse(
+            imds_agent_v2.should_wait_for_network_recovery("inbox row index shifted after refresh")
+        )
+        self.assertTrue(imds_agent_v2.is_inbox_or_search_nav_failure("Could not navigate to search page"))
         self.assertTrue(
             imds_agent_v2.should_wait_for_network_recovery("net::ERR_INTERNET_DISCONNECTED")
         )
@@ -771,6 +801,217 @@ class GadsdlSvhcModalTests(unittest.TestCase):
 
         leftover_login = FakeImdsPage(present=("inbox", "login_link", "username", "forgotten"))
         self.assertFalse(imds_agent_v2.on_public_login_page(leftover_login))
+
+
+class SearchableMdsIdTests(unittest.TestCase):
+    def test_extraction_failed_is_not_searchable(self):
+        self.assertFalse(imds_agent_v2.is_searchable_mds_id("EXTRACTION_FAILED"))
+        self.assertFalse(imds_agent_v2.is_searchable_mds_id(""))
+        self.assertFalse(imds_agent_v2.is_searchable_mds_id(None))
+        self.assertFalse(imds_agent_v2.is_searchable_mds_id("Open Failed"))
+        self.assertTrue(imds_agent_v2.is_searchable_mds_id("1527311944 / 2"))
+        self.assertTrue(imds_agent_v2.is_searchable_mds_id("1527311944"))
+
+    def test_search_mds_by_id_skips_invalid_without_page(self):
+        self.assertFalse(imds_agent_v2.search_mds_by_id(None, "EXTRACTION_FAILED"))
+        self.assertFalse(imds_agent_v2.search_mds_by_id(None, ""))
+        self.assertFalse(imds_agent_v2.search_mds_by_id(None, "Open Failed"))
+
+    def test_accept_reject_skip_invalid_ids(self):
+        text = (ROOT / "imds_agent_v2.py").read_text(encoding="utf-8")
+        accept_fn = text.split("def accept_passed_mds", 1)[1].split("\ndef reject_failed_mds", 1)[0]
+        reject_fn = text.split("def reject_failed_mds", 1)[1].split("\nINBOX_SEARCH_TAB", 1)[0]
+        self.assertIn("is_searchable_mds_id", accept_fn)
+        self.assertIn("is_searchable_mds_id", reject_fn)
+        self.assertIn("Skipped (invalid MDS ID)", accept_fn)
+        self.assertIn("Skipped (invalid MDS ID)", reject_fn)
+        self.assertNotIn('split("/")[0]', accept_fn.replace(" ", ""))
+        self.assertIn("Not searching invalid MDS ID", text)
+
+
+class InboxRecoverTests(unittest.TestCase):
+    def test_ensure_session_inbox_missing_does_not_wait_or_relogin(self):
+        page = FakeImdsPage(present=(), url="https://www.mdsystem.com/imdsnt")
+        self.assertFalse(imds_agent_v2.page_looks_offline(page))
+        self.assertFalse(imds_agent_v2.on_public_login_page(page))
+        with (
+            mock.patch.object(
+                imds_agent_v2, "recover_inbox_list", return_value=True
+            ) as recover,
+            mock.patch.object(
+                imds_agent_v2, "wait_for_imds_chrome", return_value=True
+            ),
+            mock.patch.object(
+                imds_agent_v2, "wait_for_connectivity"
+            ) as wait,
+            mock.patch.object(imds_agent_v2, "imds_login") as login,
+        ):
+            self.assertTrue(imds_agent_v2.ensure_imds_session(page))
+            recover.assert_called()
+            wait.assert_not_called()
+            login.assert_not_called()
+
+    def test_reconnect_and_lost_table_reapply_filter(self):
+        text = (ROOT / "imds_agent_v2.py").read_text(encoding="utf-8")
+        ensure_fn = text.split("def ensure_imds_session", 1)[1].split(
+            "\ndef recover_after_network_error", 1
+        )[0]
+        recover_fn = text.split("def recover_inbox_list", 1)[1].split(
+            "\ndef return_to_inbox_results", 1
+        )[0]
+        process_fn = text.split("def process_rows_and_export", 1)[1].split(
+            "\ndef orchestrate", 1
+        )[0]
+        self.assertIn("apply_not_yet_browsed_filter_and_search", ensure_fn)
+        self.assertIn("recover_inbox_list", ensure_fn)
+        self.assertIn("apply_not_yet_browsed_filter_and_search", recover_fn)
+        self.assertIn("recover_inbox_list", process_fn)
+        self.assertIn("continuing remaining visible rows", process_fn)
+
+    def test_process_rows_does_not_relogin_on_lost_list(self):
+        text = (ROOT / "imds_agent_v2.py").read_text(encoding="utf-8")
+        process_fn = text.split("def process_rows_and_export", 1)[1].split(
+            "\ndef orchestrate", 1
+        )[0]
+        self.assertIn("not a network drop", process_fn)
+        self.assertIn("without re-login", process_fn)
+        self.assertIn("page_looks_offline", process_fn)
+        self.assertIn("on_public_login_page", process_fn)
+
+
+class _IngredientsLocator(_FakeLocator):
+    def __init__(self, page: "FakeIngredientsPage", n: int, visible: bool, kind: str):
+        super().__init__(n, visible)
+        self.page = page
+        self.kind = kind
+
+    def click(self, force: bool = False, timeout: int = 5000):
+        self.page.clicks.append(self.kind)
+        if self.kind == "ingredients":
+            self.page.ingredients = True
+
+    def hover(self, force: bool = False, timeout: int = 3000):
+        return None
+
+
+class FakeIngredientsPage:
+    """Stand-in: MDS sheet that is not on Ingredients until the tab is clicked."""
+
+    def __init__(self):
+        self.ingredients = False
+        self.clicks: list[str] = []
+        self.url = "https://www.mdsystem.com/imdsnt"
+
+    def wait_for_timeout(self, _ms: int):
+        return None
+
+    def locator(self, selector: str):
+        sel = (selector or "").lower()
+        ready = self.ingredients
+        if "sdidetailingredients" in sel or "sdiingr" in sel or "sdiingredients" in sel:
+            return _IngredientsLocator(self, 1, True, "ingredients")
+        if "ctbexpandall" in sel or "mds supplier" in sel or "treeitem" in sel:
+            return _IngredientsLocator(self, 1 if ready else 0, ready, "tree")
+        if "pt_mfile" in sel or "has-text('mds')" in sel:
+            return _IngredientsLocator(self, 1 if ready else 0, ready, "mds_menu")
+        if "lookupcompany" in sel:
+            return _IngredientsLocator(self, 0, False, "none")
+        if "pt_dcud" in sel or "afmodal" in sel:
+            return _IngredientsLocator(self, 0, False, "none")
+        return _IngredientsLocator(self, 0, False, "none")
+
+    def get_by_text(self, text: str, exact: bool = False):
+        if text == "Ingredients":
+            return _IngredientsLocator(self, 1, True, "ingredients")
+        return _IngredientsLocator(self, 0, False, "none")
+
+
+class IngredientsReadyTests(unittest.TestCase):
+    def test_ingredients_tab_retry_before_no_materials(self):
+        page = FakeIngredientsPage()
+        self.assertFalse(imds_agent_v2.ingredients_tree_ready(page))
+        self.assertFalse(imds_agent_v2.mds_menu_available(page))
+        with mock.patch.object(imds_agent_v2, "expand_tree"):
+            with mock.patch.object(imds_agent_v2, "dismiss_modal"):
+                self.assertTrue(imds_agent_v2.ensure_ingredients_ready_for_check(page))
+        self.assertIn("ingredients", page.clicks)
+        self.assertTrue(imds_agent_v2.ingredients_tree_ready(page))
+        self.assertTrue(imds_agent_v2.mds_menu_available(page))
+
+    def test_process_and_check_call_ingredients_ready(self):
+        text = (ROOT / "imds_agent_v2.py").read_text(encoding="utf-8")
+        process_fn = text.split("def process_rows_and_export", 1)[1].split(
+            "\ndef orchestrate", 1
+        )[0]
+        check_fn = text.split("def run_check", 1)[1].split("\ndef wait_for_check_results", 1)[0]
+        collect_fn = text.split("def collect_material_nodes", 1)[1].split(
+            "\ndef capture_all_material_nodes", 1
+        )[0]
+        self.assertIn("ensure_ingredients_ready_for_check", process_fn)
+        self.assertIn("ensure_ingredients_ready_for_check", check_fn)
+        self.assertIn("ensure_ingredients_ready_for_check", collect_fn)
+        self.assertIn("clicking Ingredients tab before Check", text)
+
+
+class OrdinaryOkDialogTests(unittest.TestCase):
+    def test_ordinary_notice_clicks_ok_once(self):
+        class _OkLoc:
+            def __init__(self, page, kind):
+                self.page = page
+                self.kind = kind
+                self.first = self
+
+            def count(self):
+                if self.kind in {"ok", "ok_span", "dialog"}:
+                    return 1 if self.page.modal_up else 0
+                return 0
+
+            def is_visible(self):
+                return self.count() > 0
+
+            def inner_text(self, timeout=500):
+                return "Information\nSearch complete.\nOK" if self.page.modal_up else ""
+
+            def click(self, force=False, timeout=4000):
+                self.page.clicks.append(self.kind)
+                self.page.modal_up = False
+
+            def locator(self, _sel):
+                return _OkLoc(self.page, "none")
+
+        class _OkPage:
+            def __init__(self):
+                self.modal_up = True
+                self.clicks = []
+                self.url = "https://www.mdsystem.com/imdsnt"
+
+            def wait_for_timeout(self, _ms):
+                return None
+
+            def locator(self, selector: str):
+                s = (selector or "").lower()
+                if "lookupcompany" in s:
+                    return _OkLoc(self, "none")
+                if "ctbyes" in s or "has-text('yes')" in s:
+                    return _OkLoc(self, "none")
+                if "ctbno" in s or "has-text('no')" in s:
+                    return _OkLoc(self, "none")
+                if "ctbcancel" in s or "has-text('cancel')" in s:
+                    return _OkLoc(self, "none")
+                if "ctbok > a > span" in s or "ctbok > a > span" in s.replace("\\", ""):
+                    return _OkLoc(self, "ok_span")
+                if "ctbok" in s or "has-text('ok')" in s or "value='ok'" in s:
+                    return _OkLoc(self, "ok")
+                if "pt_dcud" in s or "afmodal" in s:
+                    return _OkLoc(self, "dialog")
+                if s == "body":
+                    return _OkLoc(self, "dialog")
+                return _OkLoc(self, "none")
+
+        page = _OkPage()
+        self.assertTrue(imds_agent_v2.dismiss_modal(page, allow_escape=False))
+        self.assertEqual(page.clicks.count("ok") + page.clicks.count("ok_span"), 1)
+        self.assertFalse(page.modal_up)
 
 
 if __name__ == "__main__":

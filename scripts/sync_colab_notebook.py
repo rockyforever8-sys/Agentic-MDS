@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-REF = "main"
+REF = "cursor/row5-inbox-recover-07ca"
 
 
 def as_source_lines(text: str) -> list[str]:
@@ -68,6 +68,8 @@ Received MDSs search clicks Combined **None** then forces **Browsed** on (Playwr
 After **Login successful**, wait for IMDS chrome and open **Received MDSs** / Inbox — leftover Login DOM is not a public login page and must not burn a second OTP.
 
 A **GADSDL / SVHC Update** notice is dismissed by checking the Rec001 acknowledgment box, then **OK** (never Cancel).
+
+After a lost inbox list, **Received MDSs** + re-filter; do not re-login.
 
 Then click **Run IMDS until complete**. Output: `imds_output/check_summary.xlsx`.""",
             "md-intro",

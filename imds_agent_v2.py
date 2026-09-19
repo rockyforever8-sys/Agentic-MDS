@@ -148,12 +148,27 @@ def is_transient_network_error(exc_or_text) -> bool:
     return any(n in text for n in needles)
 
 
+def is_inbox_or_search_nav_failure(exc_or_text) -> bool:
+    """True for Inbox-missing / search-page navigation failure — not a network drop."""
+    text = str(exc_or_text or "").lower()
+    needles = (
+        "could not navigate to search page",
+        "failed to navigate to search page",
+        "search page not ready",
+        "could not return to the inbox",
+        "inbox button not found",
+        "inbox not found",
+        "could not return to the inbox list",
+        "inbox row index shifted",
+    )
+    return any(n in text for n in needles)
+
+
 def should_wait_for_network_recovery(exc_or_text) -> bool:
     """True only for connectivity / DNS / TLS drops — never search-page navigation failure."""
-    text = str(exc_or_text or "")
-    if "could not navigate to search page" in text.lower():
+    if is_inbox_or_search_nav_failure(exc_or_text):
         return False
-    return is_transient_network_error(text)
+    return is_transient_network_error(exc_or_text)
 
 
 def action_result_is_complete(action: str) -> bool:
@@ -642,6 +657,11 @@ def parse_mds_id_number(visible: str | None) -> str:
     return match.group(1) if match else ""
 
 
+def is_searchable_mds_id(visible: str | None) -> bool:
+    """True when accept/reject can search this ID (numeric, not EXTRACTION_FAILED)."""
+    return bool(parse_mds_id_number(visible))
+
+
 def mds_open_status(visible: str | None, expected: str | None) -> str:
     """Compare numeric MDS IDs only. Version is ignored. None is unknown, not a mismatch."""
     exp_id = parse_mds_id_number(expected)
@@ -922,12 +942,35 @@ def wait_for_connectivity(page, timeout_s: int | None = None) -> bool:
 
 
 def ensure_imds_session(page) -> bool:
-    """After a drop, wait for the network, re-login if IMDS expired, return to search."""
+    """After a drop, wait for the network, re-login if IMDS expired, return to search.
+
+    Inbox-missing / search-nav failure is not a network drop: recover via
+    Received MDSs + re-filter. Do not wait 15 minutes or burn a second OTP.
+    """
     try:
         if logged_in_to_imds(page) and not page_looks_offline(page):
             return True
     except Exception:
         pass
+    live_imds = False
+    try:
+        live_imds = not page_looks_offline(page) and not on_public_login_page(page)
+    except Exception:
+        live_imds = False
+    if live_imds:
+        log.info(
+            "IMDS is still reachable; recovering the inbox list without a "
+            "15-min network wait or re-login."
+        )
+        wait_for_imds_chrome(page)
+        if recover_inbox_list(page):
+            return True
+        try:
+            if logged_in_to_imds(page):
+                return True
+        except Exception:
+            pass
+        return False
     if not wait_for_connectivity(page):
         return False
     wait_for_imds_chrome(page)
@@ -939,6 +982,7 @@ def ensure_imds_session(page) -> bool:
     wait_for_imds_chrome(page)
     if session_logged_in_after_reconnect(page, login_succeeded):
         navigate_to_search_page(page)
+        apply_not_yet_browsed_filter_and_search(page)
         return True
     log.warning("Still not logged in after reconnect.")
     return False
@@ -1386,6 +1430,7 @@ def ingredients_tree_ready(page) -> bool:
         f"xpath={XP_INGREDIENTS_EXPAND}",
         f"xpath={XP_INGREDIENTS_EXPAND}/table",
         "label:has-text('MDS Supplier')",
+        "[role='treeitem']",
     ):
         try:
             if page.locator(sel).count() > 0:
@@ -1393,6 +1438,58 @@ def ingredients_tree_ready(page) -> bool:
         except Exception:
             continue
     return False
+
+
+def mds_menu_available(page) -> bool:
+    """True when the MDS menu that hosts Check/Accept/Reject is in the DOM."""
+    for sel in (
+        f"xpath={XP_MDS_MENU}",
+        "#pt1\\:pt_mFile",
+        "xpath=//*[@id='pt1:pt_mFile']",
+        "a:has-text('MDS'):visible",
+    ):
+        try:
+            if page.locator(sel).count() > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def ensure_ingredients_ready_for_check(page, attempts: int = 4) -> bool:
+    """Wait for Ingredients/tree/MDS menu before declaring no materials or Check-failed.
+
+    Row 5 on 19 Sep opened on the wrong/unready view: Expand All then immediately
+    'No material nodes found' / MDS menu missing. Click Ingredients and retry.
+    A material MDS with no child nodes must still run MDS menu + Check.
+    """
+    for attempt in range(1, attempts + 1):
+        tree = ingredients_tree_ready(page)
+        menu = mds_menu_available(page)
+        if tree and menu:
+            return True
+        log.info(
+            f"Ingredients/tree not ready yet (attempt {attempt}/{attempts}); "
+            "clicking Ingredients tab before Check."
+        )
+        click_ingredients_tab(page)
+        try:
+            page.wait_for_timeout(800)
+        except Exception:
+            pass
+        if not tree:
+            try:
+                expand_tree(page)
+            except Exception:
+                pass
+        try:
+            dismiss_modal(page, allow_escape=False, save_changes="no")
+        except Exception:
+            pass
+        if ingredients_tree_ready(page) or mds_menu_available(page):
+            return True
+    log.warning("Ingredients/tree still not ready after retries; Check will still run.")
+    return ingredients_tree_ready(page) or mds_menu_available(page)
 
 
 def dismiss_modal(page, allow_escape: bool = True, save_changes: str = "yes"):
@@ -1469,6 +1566,8 @@ def dismiss_modal(page, allow_escape: bool = True, save_changes: str = "yes"):
         log.warning("Leaving Check-results dialog in place; JS strip would freeze the leftover own MDS.")
         return False
 
+    # One OK for ordinary IMDS notices (shared #pt1:pt_dcud:ctbOk). Do not click
+    # the same OK twice via the child span. GADSDL/SVHC already checkbox-then-OK.
     for selector in [
         "#pt1\\:pt_dcud\\:ctbOk",
         "#pt1\\:pt_dcud\\:ctbOk > a > span",
@@ -1488,6 +1587,17 @@ def dismiss_modal(page, allow_escape: bool = True, save_changes: str = "yes"):
                     close_company_lookup_dialogs(page)
                 if not modal_dialog_visible(page) and lookup_company_iframe_count(page) == 0:
                     return True
+                dialog_text = visible_dialog_text(page)
+                if (
+                    is_gadsdl_svhc_update_prompt(dialog_text)
+                    or is_save_changes_prompt(dialog_text)
+                    or is_forward_previous_version_prompt(dialog_text)
+                    or is_check_errors_blocking_prompt(dialog_text)
+                    or yes_no_buttons_visible(page)
+                ):
+                    break
+                log.info("Ordinary dialog already received one OK; not clicking OK again.")
+                return True
         except Exception:
             continue
 
@@ -1668,11 +1778,23 @@ def navigate_to_search_page(page):
                 return True
         except Exception as e:
             log.warning(f"Error using back button: {e}")
+        inbox_ok = False
         try:
-            if _click_inbox_mds(page):
+            inbox_ok = _click_inbox_mds(page)
+            if inbox_ok:
                 return True
         except Exception as e:
             log.warning(f"Error navigating to search page via Inbox: {e}")
+        # Inbox missing: use Received MDSs (the path that works in accept/reject).
+        # Do not only wait 4× on Inbox then reload.
+        if not inbox_ok:
+            log.info("Inbox missing; retrying Received MDSs link after chrome wait.")
+            wait_for_imds_chrome(page, timeout_ms=8000)
+            try:
+                if _click_received_mds_link(page) or _click_received_mds_menu(page):
+                    return True
+            except Exception as e:
+                log.warning(f"Error retrying Received MDSs after Inbox-missing: {e}")
         log.info(f"Search page not ready yet (attempt {attempt}/4); waiting for IMDS chrome...")
         wait_for_imds_chrome(page, timeout_ms=8000)
         try:
@@ -1723,11 +1845,12 @@ def navigate_to_search_page(page):
     return False
 
 # ---------- Navigate and Filter ----------
-def navigate_and_filter(page):
-    log.info("Navigating to Received MDSs and applying filter...")
-    if not navigate_to_search_page(page):
-        raise RuntimeError("Could not navigate to search page")
+def apply_not_yet_browsed_filter_and_search(page) -> bool:
+    """Re-apply the inbox 'not yet browsed' filter and Search.
 
+    After a reconnect or a lost results table the ID field may be back but
+    tResult:N:cName is empty until this filter + Search run again.
+    """
     log.info("Applying filter...")
     page.evaluate("""
         () => {
@@ -1842,6 +1965,14 @@ def navigate_and_filter(page):
         log.warning("Table not found.")
     page.wait_for_timeout(2000)
     save_screenshot(page, "06_final_list.png")
+    return True
+
+
+def navigate_and_filter(page):
+    log.info("Navigating to Received MDSs and applying filter...")
+    if not navigate_to_search_page(page):
+        raise RuntimeError("Could not navigate to search page")
+    apply_not_yet_browsed_filter_and_search(page)
 
 # ---------- Expand Tree ----------
 def expand_tree(page):
@@ -1937,18 +2068,42 @@ def extract_mds_id_version_early(page):
     return "EXTRACTION_FAILED"
 
 # ---------- Capture Material Nodes ----------
+def collect_material_nodes(page, retries: int = 3):
+    """Find material tree nodes. Retry Ingredients + Expand All before giving up."""
+    material_nodes = []
+    for attempt in range(1, retries + 1):
+        material_nodes = page.locator("[role='treeitem']:has(img[src*='material'])").all()
+        if not material_nodes:
+            material_images = page.locator("img[src*='btn_tree_material']").all()
+            material_nodes = []
+            for img in material_images:
+                parent = img.locator("xpath=ancestor::*[@role='treeitem']")
+                if parent.count():
+                    material_nodes.append(parent)
+        if material_nodes:
+            return material_nodes
+        if attempt < retries:
+            log.info(
+                f"Material nodes not visible yet (attempt {attempt}/{retries}); "
+                "clicking Ingredients and retrying Expand All."
+            )
+            ensure_ingredients_ready_for_check(page, attempts=2)
+            try:
+                expand_tree(page)
+            except Exception:
+                pass
+            try:
+                page.wait_for_timeout(800)
+            except Exception:
+                pass
+    log.warning("No material nodes found.")
+    return []
+
+
 def capture_all_material_nodes(page, iteration):
     log.info("Capturing screenshots of all material nodes...")
-    material_nodes = page.locator("[role='treeitem']:has(img[src*='material'])").all()
+    material_nodes = collect_material_nodes(page)
     if not material_nodes:
-        material_images = page.locator("img[src*='btn_tree_material']").all()
-        material_nodes = []
-        for img in material_images:
-            parent = img.locator("xpath=ancestor::*[@role='treeitem']")
-            if parent.count():
-                material_nodes.append(parent)
-    if not material_nodes:
-        log.warning("No material nodes found.")
         return
     log.info(f"Found {len(material_nodes)} material nodes.")
     previous_name = ""
@@ -2092,21 +2247,13 @@ def run_checks_on_mds(page, iteration, mds_id):
         '5.5.1', '5.5.2', '6.1', '9.7', '7.1'
     ]
 
-    material_nodes = page.locator("[role='treeitem']:has(img[src*='material'])").all()
-    if not material_nodes:
-        material_images = page.locator("img[src*='btn_tree_material']").all()
-        material_nodes = []
-        for img in material_images:
-            parent = img.locator("xpath=ancestor::*[@role='treeitem']")
-            if parent.count():
-                material_nodes.append(parent)
+    material_nodes = collect_material_nodes(page)
 
     comp_material_map = {}
     recyclate_fail = False
     biocidal_fail = False
 
     if not material_nodes:
-        log.warning("No material nodes found.")
         return {
             "parts_marking_check": "No materials",
             "recyclate_check": "No materials",
@@ -2177,6 +2324,9 @@ def run_checks_on_mds(page, iteration, mds_id):
 def click_first_tree_node(page):
     log.info("Clicking the first tree node...")
     first_node = page.locator("[role='treeitem']:visible, .af_tree_node_text:visible").first
+    if first_node.count() == 0:
+        ensure_ingredients_ready_for_check(page, attempts=2)
+        first_node = page.locator("[role='treeitem']:visible, .af_tree_node_text:visible").first
     if first_node.count() > 0:
         try:
             first_node.scroll_into_view_if_needed()
@@ -2259,6 +2409,8 @@ def read_check_results_text(page) -> str:
 def run_check(page):
     log.info("Performing check...")
     try:
+        if not mds_menu_available(page) or not ingredients_tree_ready(page):
+            ensure_ingredients_ready_for_check(page)
         mds_menu = page.locator(f"xpath={XP_MDS_MENU}")
         if mds_menu.count() > 0 and mds_menu.is_visible():
             mds_menu.click(force=True)
@@ -2272,8 +2424,18 @@ def run_check(page):
                 log.info("Clicked MDS menu (fallback).")
                 page.wait_for_timeout(1000)
             else:
-                log.warning("MDS menu not found.")
-                return False
+                log.info("MDS menu still missing; clicking Ingredients and retrying Check.")
+                ensure_ingredients_ready_for_check(page, attempts=2)
+                mds_menu = page.locator(f"xpath={XP_MDS_MENU}")
+                if mds_menu.count() == 0 or not mds_menu.is_visible():
+                    mds_menu = page.locator("a:has-text('MDS'):visible, #pt1\\:pt_mFile .x18v:visible").first
+                if mds_menu.count() > 0:
+                    mds_menu.click(force=True)
+                    log.info("Clicked MDS menu after Ingredients retry.")
+                    page.wait_for_timeout(1000)
+                else:
+                    log.warning("MDS menu not found.")
+                    return False
 
         check_item = page.locator("a:has-text('Check'):visible, #pt1\\:pt_cmiMenuCheck:visible").first
         check_item.wait_for(state="visible", timeout=10000)
@@ -3955,6 +4117,9 @@ def search_mds_by_id(page, mds_id_num: str) -> bool:
     If Browsed-only returns no rows, retry with all statuses. Opening the MDS
     still marks it browsed so Accept stays active.
     """
+    if not is_searchable_mds_id(mds_id_num):
+        log.warning(f"Not searching invalid MDS ID {mds_id_num!r}.")
+        return False
     wait_for_glass_pane_clear(page, timeout_ms=5000, save_changes="no")
     if not navigate_to_search_page(page):
         return False
@@ -4041,11 +4206,21 @@ def accept_passed_mds(page, results):
             log.info(f"Skipping row {idx+1} (already {res.get('Action Result')})")
             continue
 
-        mds_id_num = res["MDS ID / Version"].split('/')[0].strip()
+        if not is_searchable_mds_id(res.get("MDS ID / Version")):
+            log.warning(
+                f"Skipping accept for invalid MDS ID {res.get('MDS ID / Version')!r}."
+            )
+            if not action_result_is_complete(res.get("Action Result", "")):
+                res["Action Result"] = "Skipped (invalid MDS ID)"
+            save_check_summary(results)
+            continue
+        mds_id_num = parse_mds_id_number(res["MDS ID / Version"])
         supplier_code = res.get("Supplier Code", "")
         part_no = res.get("Part/Item No.", "")
         log.info(f"Searching for MDS ID: {mds_id_num}")
-        if not logged_in_to_imds(page) or page_looks_offline(page):
+        if page_looks_offline(page) or (
+            on_public_login_page(page) and not logged_in_to_imds(page)
+        ):
             if not ensure_imds_session(page):
                 res["Action Result"] = "Search Failed"
                 save_check_summary(results)
@@ -4145,9 +4320,19 @@ def reject_failed_mds(page, results):
             log.info(f"Skipping row {idx+1} (already {res.get('Action Result')})")
             continue
 
-        mds_id_num = res["MDS ID / Version"].split('/')[0].strip()
+        if not is_searchable_mds_id(res.get("MDS ID / Version")):
+            log.warning(
+                f"Skipping reject for invalid MDS ID {res.get('MDS ID / Version')!r}."
+            )
+            if not action_result_is_complete(res.get("Action Result", "")):
+                res["Action Result"] = "Skipped (invalid MDS ID)"
+            save_check_summary(results)
+            continue
+        mds_id_num = parse_mds_id_number(res["MDS ID / Version"])
         log.info(f"Rejecting MDS ID: {mds_id_num}")
-        if not logged_in_to_imds(page) or page_looks_offline(page):
+        if page_looks_offline(page) or (
+            on_public_login_page(page) and not logged_in_to_imds(page)
+        ):
             if not ensure_imds_session(page):
                 res["Action Result"] = "Search Failed"
                 save_check_summary(results)
@@ -4184,6 +4369,69 @@ INBOX_SEARCH_TAB = "//*[@id='pt1:sdiInboxSearch::disAcr']"
 INBOX_FIRST_ROW = "//*[@id='pt1:dcCmds:sfIbLU:pc2:tResult:0:cName']"
 
 
+def inbox_row_xpath(index: int) -> str:
+    return f"//*[@id='pt1:dcCmds:sfIbLU:pc2:tResult:{index}:cName']"
+
+
+def inbox_row_visible(page, index: int) -> bool:
+    try:
+        loc = page.locator(f"xpath={inbox_row_xpath(index)}")
+        return loc.count() > 0
+    except Exception:
+        return False
+
+
+def inbox_results_table_ready(page) -> bool:
+    """True when a result name cell is in the DOM."""
+    try:
+        if page.locator(f"xpath={INBOX_FIRST_ROW}").count() > 0:
+            return True
+        if page.locator(
+            "xpath=//*[contains(@id,'tResult:') and contains(@id,':cName')]"
+        ).count() > 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def next_visible_inbox_index(page, start: int = 0, limit: int = 40) -> int | None:
+    for n in range(start, limit):
+        if inbox_row_visible(page, n):
+            return n
+    return None
+
+
+def recover_inbox_list(page, *, reapply_filter: bool = True) -> bool:
+    """Return to Received MDSs and restore the not-yet-browsed list. Never a network wait."""
+    wait_for_imds_chrome(page)
+    ok = False
+    try:
+        if _click_received_mds_link(page):
+            ok = True
+        elif _click_received_mds_menu(page):
+            ok = True
+        else:
+            ok = return_to_inbox_results(page)
+    except Exception as e:
+        log.warning(f"Inbox recover via Received MDSs failed: {e}")
+        ok = False
+    if not ok:
+        try:
+            ok = navigate_to_search_page(page)
+        except Exception as e:
+            log.warning(f"Inbox recover navigate failed: {e}")
+            return False
+    wait_for_imds_chrome(page)
+    if reapply_filter or not inbox_results_table_ready(page):
+        try:
+            apply_not_yet_browsed_filter_and_search(page)
+        except Exception as e:
+            log.warning(f"Re-applying not-yet-browsed filter failed: {e}")
+            return False
+    return inbox_results_table_ready(page) or _search_id_field_ready(page)
+
+
 def return_to_inbox_results(page) -> bool:
     """Leave an open MDS / Check overlay and show the Received MDSs result list."""
     log.info("Going back to results page...")
@@ -4195,8 +4443,15 @@ def return_to_inbox_results(page) -> bool:
         if back_btn.count() > 0:
             back_btn.click(force=True)
             log.info("Clicked Received MDSs / Inbox search tab.")
+        elif _click_received_mds_link(page):
+            log.info("Inbox tab missing; used Received MDSs link.")
+        elif _click_received_mds_menu(page):
+            log.info("Inbox tab missing; used Received MDSs menu.")
         elif not navigate_to_search_page(page):
-            page.go_back()
+            log.warning(
+                "Could not return via Received MDSs; not using browser Back on a live sheet."
+            )
+            return False
         wait_networkidle(page, 15000)
         page.wait_for_timeout(1500)
         close_check_results_dialog(page, any_check_overlay=True)
@@ -4218,9 +4473,12 @@ def process_rows_and_export(page):
 
     i = 0
     network_retries = 0
-    while i < NUM_ITERATIONS:
-        row_xpath = f"//*[@id='pt1:dcCmds:sfIbLU:pc2:tResult:{i}:cName']"
-        log.info(f"Processing MDS row {i+1}/{NUM_ITERATIONS} using XPath: {row_xpath}")
+    processed_ids: set[str] = set()
+    while len(results) < NUM_ITERATIONS and i < 40:
+        row_xpath = inbox_row_xpath(i)
+        log.info(
+            f"Processing MDS row {len(results)+1}/{NUM_ITERATIONS} using XPath: {row_xpath}"
+        )
         supplier_code = ""
         part_no = ""
         mds_id = "EXTRACTION_FAILED"
@@ -4232,9 +4490,18 @@ def process_rows_and_export(page):
         retry_same = False
 
         try:
-            if not logged_in_to_imds(page) or page_looks_offline(page):
+            if page_looks_offline(page) or (
+                on_public_login_page(page) and not logged_in_to_imds(page)
+            ):
                 if not ensure_imds_session(page):
                     raise RuntimeError("IMDS session could not be restored after a network drop.")
+            elif not logged_in_to_imds(page) or not inbox_results_table_ready(page):
+                log.info(
+                    "Inbox list missing or chrome not ready; recovering via "
+                    "Received MDSs + re-filter (not a network drop)."
+                )
+                if not recover_inbox_list(page):
+                    log.warning("Could not restore the inbox list; will try this row anyway.")
             row_element = page.locator(row_xpath)
             try:
                 row_element.wait_for(state="visible", timeout=10000)
@@ -4242,17 +4509,33 @@ def process_rows_and_export(page):
                 log.warning(
                     f"Row {i} not visible ({e}); returning to the Received MDSs list and retrying."
                 )
-                return_to_inbox_results(page)
-                row_element = page.locator(row_xpath)
+                recover_inbox_list(page)
+                if not inbox_row_visible(page, i):
+                    nxt = next_visible_inbox_index(page, 0)
+                    if nxt is None:
+                        log.info("No more visible inbox rows after refresh.")
+                        break
+                    if nxt != i:
+                        log.info(
+                            f"Indexed row {i} is gone after refresh; "
+                            f"continuing remaining visible rows from index {nxt}."
+                        )
+                        i = nxt
+                        retry_same = True
+                        raise RuntimeError("inbox row index shifted after refresh")
+                row_element = page.locator(f"xpath={inbox_row_xpath(i)}")
                 try:
                     row_element.wait_for(state="visible", timeout=15000)
                 except Exception as e2:
-                    first = page.locator(f"xpath={INBOX_FIRST_ROW}")
-                    if first.count() > 0:
+                    nxt = next_visible_inbox_index(page, 0)
+                    if nxt is not None and nxt != i:
                         log.info(
-                            f"Inbox list is showing but row {i} is absent; no more MDS rows."
+                            f"Inbox list is showing but row {i} is absent; "
+                            "indexes may have shifted — continuing remaining visible rows."
                         )
-                        break
+                        i = nxt
+                        retry_same = True
+                        raise RuntimeError("inbox row index shifted after refresh")
                     log.warning(f"Row {i} still not found: {e2}. Continuing with remaining rows.")
                     raise
             log.info(f"Row {i} found and visible.")
@@ -4291,9 +4574,23 @@ def process_rows_and_export(page):
             wait_networkidle(page, 15000)
             page.wait_for_timeout(2000)
             dismiss_modal(page)
+            ensure_ingredients_ready_for_check(page)
 
             mds_id = extract_mds_id_version_early(page)
             log.info(f"Extracted ID/Version: {mds_id}")
+            seen = parse_mds_id_number(mds_id)
+            if seen and seen in processed_ids:
+                log.info(f"Already processed {mds_id}; skipping duplicate after list refresh.")
+                nxt = next_visible_inbox_index(page, i + 1)
+                if nxt is None:
+                    recover_inbox_list(page)
+                    nxt = next_visible_inbox_index(page, 0)
+                if nxt is None or nxt == i:
+                    log.info("No remaining unread inbox rows after skipping a duplicate.")
+                    break
+                i = nxt
+                retry_same = True
+                raise RuntimeError("inbox row index shifted after refresh")
 
             expand_tree(page)
             dismiss_modal(page)
@@ -4343,27 +4640,31 @@ def process_rows_and_export(page):
                 "Part/Item No.": part_no,
                 "Action Result": "Pending action",
             })
+            if seen := parse_mds_id_number(mds_id):
+                processed_ids.add(seen)
             log.info(
-                f"Row {i+1}: {mds_id} -> Check: {result_msg} | "
+                f"Row {len(results)}: {mds_id} -> Check: {result_msg} | "
                 f"Parts: {rule_results['parts_marking_check']} | "
                 f"Recyclate: {rule_results['recyclate_check']} | "
                 f"Biocidal: {rule_results['biocidal_check']} | Overall: {overall} | "
                 f"Supplier: {supplier_code} | Part: {part_no}"
             )
         except Exception as e:
+            if retry_same or "inbox row index shifted" in str(e).lower():
+                retry_same = True
             network = should_wait_for_network_recovery(e)
             if network:
                 log.warning(
-                    f"Row {i+1} hit a network/session drop: {e}. "
+                    f"Row {len(results)+1} hit a network/session drop: {e}. "
                     "Waiting to reconnect, then retrying this row."
                 )
                 if network_retries < 3 and recover_after_network_error(page, e):
                     network_retries += 1
                     retry_same = True
             if not retry_same:
-                log.warning(f"Row {i+1} failed: {e}. Continuing with remaining rows.")
+                log.warning(f"Row {len(results)+1} failed: {e}. Continuing with remaining rows.")
                 try:
-                    save_screenshot(page, f"mds_row_{i+1}_error.png")
+                    save_screenshot(page, f"mds_row_{len(results)+1}_error.png")
                 except Exception:
                     pass
                 results.append({
@@ -4377,15 +4678,19 @@ def process_rows_and_export(page):
                     "Part/Item No.": part_no,
                     "Action Result": "Row processing Failed",
                 })
+                if seen := parse_mds_id_number(mds_id):
+                    processed_ids.add(seen)
 
         if retry_same:
             continue
         network_retries = 0
-        if i < NUM_ITERATIONS - 1:
+        if len(results) < NUM_ITERATIONS:
             if not return_to_inbox_results(page):
                 log.warning(
-                    "Could not return to the inbox list; will retry at the start of the next row."
+                    "Could not return to the inbox list; recovering via Received MDSs "
+                    "without re-login."
                 )
+                recover_inbox_list(page)
         i += 1
 
     save_check_summary(results)
