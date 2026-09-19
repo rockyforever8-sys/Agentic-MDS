@@ -6,16 +6,25 @@ import os, pathlib, subprocess
 
 ROOT = pathlib.Path("/content/Agentic-MDS")
 REPO = "https://github.com/rockyforever8-sys/Agentic-MDS.git"
-BRANCH = "cursor/row5-inbox-recover-07ca"
-PIN = "8e1eb4ceeb568e5e730bebf12c37bfbf3b436c2a"
-REF = os.environ.get("IMDS_GIT_REF", PIN)
+REF = os.environ.get("IMDS_GIT_REF", "main")
 if not (ROOT / ".git").exists():
-    subprocess.check_call(["git", "clone", "--depth", "50", "--branch", BRANCH, REPO, str(ROOT)])
+    try:
+        subprocess.check_call(["git", "clone", "--depth", "1", "--branch", REF, REPO, str(ROOT)])
+    except subprocess.CalledProcessError:
+        subprocess.check_call(["git", "clone", "--depth", "1", REPO, str(ROOT)])
 else:
-    subprocess.check_call(["git", "-C", str(ROOT), "fetch", "--depth", "50", "origin", BRANCH])
+    fetched = False
+    for _ref in (REF, "main"):
+        try:
+            subprocess.check_call(["git", "-C", str(ROOT), "fetch", "--depth", "1", "origin", _ref])
+            subprocess.check_call(["git", "-C", str(ROOT), "checkout", "-B", _ref, f"origin/{_ref}"])
+            fetched = True
+            break
+        except subprocess.CalledProcessError:
+            print("Could not fetch origin/" + _ref)
+    if not fetched:
+        raise RuntimeError("git fetch failed for " + REF + " and main")
 os.chdir(ROOT)
-subprocess.check_call(["git", "checkout", "--detach", REF])
 print("Working directory:", os.getcwd())
-print("git HEAD:", subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip())
 print("Next: run Cell 1 in Colab_Start_Here.ipynb, or:")
 print("  !python imds_agent_v2.py")

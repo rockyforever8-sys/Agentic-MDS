@@ -10,9 +10,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BRANCH = "cursor/row5-inbox-recover-07ca"
-PINNED_SHA = "8e1eb4ceeb568e5e730bebf12c37bfbf3b436c2a"
-REF = PINNED_SHA
+REF = "main"
 
 
 def as_source_lines(text: str) -> list[str]:
@@ -47,7 +45,7 @@ def cells() -> list[dict]:
 **Do not paste this `.ipynb` file into a code cell.** It is JSON. That causes `NameError: name 'true' is not defined`.
 
 Open it as a notebook:
-- [Open Colab_Start_Here.ipynb in Google Colab](https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/cursor/row5-inbox-recover-07ca/Colab_Start_Here.ipynb)
+- [Open Colab_Start_Here.ipynb in Google Colab](https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/main/Colab_Start_Here.ipynb)
 - Or Colab **File → Upload notebook**
 
 This notebook runs the **original IMDS agent** (`imds_agent_v2.py`) — same XPaths and actions that already produced your Excel output. The only change is **secret authentication**: passwords stay in Colab 🔑, not in the script.
@@ -84,18 +82,27 @@ import os, pathlib, subprocess, sys
 
 ROOT = pathlib.Path("/content/Agentic-MDS")
 REPO = "https://github.com/rockyforever8-sys/Agentic-MDS.git"
-BRANCH = "{BRANCH}"
-PIN = "{PINNED_SHA}"
-REF = os.environ.get("IMDS_GIT_REF", PIN)
+REF = os.environ.get("IMDS_GIT_REF", "{REF}")
 if not (ROOT / ".git").exists():
-    subprocess.check_call(["git", "clone", "--depth", "50", "--branch", BRANCH, REPO, str(ROOT)])
+    try:
+        subprocess.check_call(["git", "clone", "--depth", "1", "--branch", REF, REPO, str(ROOT)])
+    except subprocess.CalledProcessError:
+        subprocess.check_call(["git", "clone", "--depth", "1", REPO, str(ROOT)])
 else:
-    subprocess.check_call(["git", "-C", str(ROOT), "fetch", "--depth", "50", "origin", BRANCH])
+    fetched = False
+    for _ref in (REF, "main"):
+        try:
+            subprocess.check_call(["git", "-C", str(ROOT), "fetch", "--depth", "1", "origin", _ref])
+            subprocess.check_call(["git", "-C", str(ROOT), "checkout", "-B", _ref, f"origin/{{_ref}}"])
+            fetched = True
+            break
+        except subprocess.CalledProcessError:
+            print("Could not fetch origin/" + _ref)
+    if not fetched:
+        raise RuntimeError("git fetch failed")
 os.chdir(ROOT)
-subprocess.check_call(["git", "checkout", "--detach", REF])
 print("Working directory:", os.getcwd())
-print("git HEAD:", subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip())
-print("cloned branch:", BRANCH, "pinned:", PIN)
+print("git HEAD:", subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip())
 
 %pip install -q playwright pandas openpyxl nest_asyncio pyotp cryptography ipywidgets
 !python -m playwright install-deps chromium
