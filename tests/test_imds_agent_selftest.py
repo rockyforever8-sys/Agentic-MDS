@@ -90,16 +90,44 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertIn("GADSDL / SVHC", text)
         login_fn = text.split("def imds_login", 1)[1].split("\ndef _sel_count", 1)[0]
         self.assertIn("dismiss_modal", login_fn)
-        nav_src = text.split("def navigate_to_search_page", 1)[1].split("\ndef navigate_and_filter", 1)[0]
-        self.assertIn("dismiss_modal", nav_src)
-        inbox_fn = text.split("def _click_inbox_mds", 1)[1].split("\ndef navigate_to_search_page", 1)[0]
+        blockers_fn = text.split("def _dismiss_nav_blockers", 1)[1].split(
+            "\ndef _try_search_nav_fast", 1
+        )[0]
+        self.assertIn("dismiss_modal", blockers_fn)
+        fast_fn = text.split("def _try_search_nav_fast", 1)[1].split(
+            "\ndef recover_imds_chrome_once", 1
+        )[0]
+        self.assertIn("Inbox missing; retrying Received MDSs", fast_fn)
+        recover_fn = text.split("def recover_imds_chrome_once", 1)[1].split(
+            "\ndef leave_own_mds_for_inbox", 1
+        )[0]
+        self.assertIn("wait_for_imds_chrome", recover_fn)
+        self.assertIn("not burning a second OTP", recover_fn)
+        self.assertNotIn("imds_login", recover_fn)
+        leave_fn = text.split("def leave_own_mds_for_inbox", 1)[1].split(
+            "\ndef navigate_to_search_page", 1
+        )[0]
+        self.assertIn('save_changes="no"', leave_fn)
+        self.assertIn("_click_received_mds_link", leave_fn)
+        self.assertIn("_click_received_mds_menu", leave_fn)
+        inbox_fn = text.split("def _click_inbox_mds", 1)[1].split("\ndef _dismiss_nav_blockers", 1)[0]
         self.assertNotIn("go_back()", inbox_fn)
         self.assertNotIn("trying to go back", inbox_fn)
-        nav_fn = text.split("def navigate_to_search_page", 1)[1].split("\ndef apply_not_yet_browsed_filter_and_search", 1)[0]
+        nav_fn = text.split("def navigate_to_search_page", 1)[1].split(
+            "\ndef apply_not_yet_browsed_filter_and_search", 1
+        )[0]
         self.assertNotIn("go_back()", nav_fn)
-        self.assertIn("wait_for_imds_chrome", nav_fn)
         self.assertIn("logged_in_to_imds", nav_fn)
-        self.assertIn("Inbox missing; retrying Received MDSs", nav_fn)
+        self.assertIn("_dismiss_nav_blockers", nav_fn)
+        self.assertIn("not looping Inbox", nav_fn)
+        self.assertLess(nav_fn.find("_dismiss_nav_blockers"), nav_fn.find("_try_search_nav_fast"))
+        self.assertIn("recover_imds_chrome_once", nav_fn)
+        self.assertIn("ACCEPT_CONFIRM_WAIT_MS", text)
+        self.assertIn("def _wait_and_click_accept_confirm", text)
+        self.assertIn("def _cancel_leftover_accept_dialog", text)
+        self.assertIn("Not opening MDS menu while a dialog", text)
+        self.assertIn("not retrying MDS menu", text)
+        self.assertIn("dcPopup:ctbAcceptMds", text)
         ret_fn = text.split("def return_to_inbox_results", 1)[1].split("\ndef process_rows_and_export", 1)[0]
         self.assertNotIn("go_back()", ret_fn)
         self.assertIn("_click_received_mds_link", ret_fn)
@@ -128,6 +156,7 @@ class OriginalAgentTests(unittest.TestCase):
         )[0]
         self.assertIn("leaving the inbox without Add Recipient", pass_fn)
         self.assertIn("Forward Failed", pass_fn)
+        self.assertIn("leave_own_mds_for_inbox", pass_fn)
 
     def test_load_live_credentials_requires_secrets(self):
         saved = {k: os.environ.pop(k, None) for k in ("IMDS_USERNAME", "IMDS_PASSWORD", "OTP_SECRET", "IMDS_MASTER_KEY")}
@@ -1066,8 +1095,18 @@ class _KindLoc:
         self.page.clicks.append(self.kind or self.element_id or "unknown")
         if self.kind == "accept_menu":
             self.page.accept_menu_up = False
+            if hasattr(self.page, "accept_clicked_at"):
+                self.page.accept_clicked_at = getattr(self.page, "waited_ms", 0)
+            if hasattr(self.page, "dialog_up"):
+                self.page.dialog_up = True
         if self.kind == "confirm":
             self.page.confirmed = True
+            if hasattr(self.page, "dialog_up"):
+                self.page.dialog_up = False
+        if self.kind == "cancel":
+            self.page.cancelled = True
+            if hasattr(self.page, "dialog_up"):
+                self.page.dialog_up = False
         if self.kind == "dialog_forward":
             self.page.clicked_user_dialog = True
         if self.kind == "inbox_row":
@@ -1293,6 +1332,7 @@ class AcceptForwardInboxTests(unittest.TestCase):
                 imds_agent_v2, "wait_for_forwarded_own_mds", return_value=""
             ),
             mock.patch.object(imds_agent_v2, "complete_forward_recipients") as recip,
+            mock.patch.object(imds_agent_v2, "leave_own_mds_for_inbox", return_value=True),
             mock.patch.object(imds_agent_v2, "navigate_to_search_page", return_value=True),
             mock.patch.object(imds_agent_v2, "save_check_summary"),
             mock.patch.object(imds_agent_v2, "close_check_results_dialog"),
@@ -1323,6 +1363,263 @@ class AcceptForwardInboxTests(unittest.TestCase):
                 self.assertFalse(imds_agent_v2.forward_mds(page))
         self.assertFalse(page.clicked_user_dialog)
         self.assertNotIn("dialog_forward", page.clicks)
+
+
+class FakeAcceptSlowConfirmPage:
+    """Confirm control appears only after a longer wait (draft 0.01 leftover dcPopup)."""
+
+    def __init__(self):
+        self.clicks = []
+        self.accept_menu_up = True
+        self.confirmed = False
+        self.waited_ms = 0
+        self.accept_clicked_at = None
+        self.url = "https://www.mdsystem.com/imdsnt"
+
+    def _confirm_ready(self):
+        if self.accept_clicked_at is None:
+            return False
+        return (self.waited_ms - self.accept_clicked_at) >= 4000
+
+    def wait_for_timeout(self, ms):
+        self.waited_ms += int(ms or 0)
+
+    def wait_for_load_state(self, *_a, **_k):
+        return None
+
+    def wait_for_selector(self, selector, **_k):
+        s = (selector or "").lower()
+        if "mds accepted" in s and self.confirmed:
+            return True
+        raise TimeoutError(selector)
+
+    def locator(self, selector: str):
+        s = (selector or "").lower().replace("\\", "")
+        if "lookupcompany" in s:
+            return _KindLoc(self, "none")
+        if "pt_mfile" in s or "has-text('mds')" in s:
+            return _KindLoc(self, "mds_menu", n=1, visible=True)
+        if "pt_cmimenuaccept" in s or "id='pt1:pt_cmimenuaccept'" in s:
+            n = 1 if self.accept_menu_up else 0
+            return _KindLoc(self, "accept_menu", n=n, visible=bool(n))
+        if "ctbacceptmds" in s or "ctbaccept" in s or (
+            "dcpopup" in s and "accept" in s
+        ):
+            n = 1 if self._confirm_ready() and not self.confirmed else 0
+            return _KindLoc(self, "confirm", n=n, visible=bool(n))
+        if "pt_dcud" in s or "afmodal" in s or s in {"#dcpopup", "[id='dcpopup']"}:
+            return _KindLoc(self, "dialog", n=0)
+        if s.startswith("td:has-text('accept')") or s.startswith(
+            "[role='menuitem']:has-text('accept')"
+        ):
+            raise AssertionError(f"broad Accept locator must not be used: {selector}")
+        return _KindLoc(self, "none")
+
+
+class FakeAcceptLeftoverDialogPage:
+    """Accept menu opens a leftover dcPopup; confirm never appears; Cancel restores chrome."""
+
+    def __init__(self):
+        self.clicks = []
+        self.accept_menu_up = True
+        self.dialog_up = False
+        self.confirmed = False
+        self.cancelled = False
+        self.url = "https://www.mdsystem.com/imdsnt"
+
+    def wait_for_timeout(self, _ms):
+        return None
+
+    def wait_for_load_state(self, *_a, **_k):
+        return None
+
+    def wait_for_selector(self, selector, **_k):
+        raise TimeoutError(selector)
+
+    def locator(self, selector: str):
+        s = (selector or "").lower().replace("\\", "")
+        if "lookupcompany" in s:
+            return _KindLoc(self, "none")
+        if "ctbok" in s:
+            return _KindLoc(self, "ok", n=0)
+        if "cmi" not in s and "cancel" not in s and (
+            "ctbaccept" in s
+            or "has-text('accept" in s
+            or "value='accept'" in s
+            or "button:has-text('accept" in s
+        ):
+            return _KindLoc(self, "confirm", n=0)
+        if "ctbcancel" in s or "has-text('cancel')" in s or "value='cancel'" in s:
+            n = 1 if self.dialog_up else 0
+            return _KindLoc(self, "cancel", n=n, visible=bool(n))
+        if "pt_cmimenuaccept" in s or "id='pt1:pt_cmimenuaccept'" in s:
+            n = 1 if self.accept_menu_up and not self.dialog_up else 0
+            return _KindLoc(self, "accept_menu", n=n, visible=bool(n))
+        if "pt_mfile" in s or "has-text('mds')" in s:
+            return _KindLoc(self, "mds_menu", n=1, visible=True)
+        if (
+            "afmodal" in s
+            or "glass" in s
+            or "pt_dcud" in s
+            or "dcpopup" in s
+        ):
+            n = 1 if self.dialog_up else 0
+            return _KindLoc(self, "dialog", n=n, visible=bool(n), text="Accept MDS")
+        if s.startswith("td:has-text('accept')") or s.startswith(
+            "[role='menuitem']:has-text('accept')"
+        ):
+            raise AssertionError(f"broad Accept locator must not be used: {selector}")
+        return _KindLoc(self, "none")
+
+
+class _GoneLoc:
+    def __init__(self, page):
+        self.page = page
+        self.first = self
+
+    def count(self):
+        return 0
+
+    def is_visible(self):
+        return False
+
+    def click(self, **_k):
+        raise TimeoutError("missing")
+
+    def locator(self, _sel):
+        return self
+
+    def inner_text(self, **_k):
+        return ""
+
+    def text_content(self, **_k):
+        return ""
+
+
+class FakeChromeGonePage:
+    """Inbox chrome is gone; leftover Login DOM must not trigger re-login."""
+
+    def __init__(self):
+        self.gotos = []
+        self.clicks = []
+        self.url = "https://www.mdsystem.com/imdsnt"
+
+    def wait_for_timeout(self, _ms):
+        return None
+
+    def wait_for_load_state(self, *_a, **_k):
+        raise TimeoutError("networkidle")
+
+    def wait_for_selector(self, selector, **_k):
+        raise TimeoutError(selector)
+
+    def goto(self, url, **_k):
+        self.gotos.append(url)
+
+    def locator(self, _selector: str):
+        return _GoneLoc(self)
+
+
+class AcceptChromeRecoveryTests(unittest.TestCase):
+    def test_confirm_wait_is_longer_than_two_seconds(self):
+        self.assertGreaterEqual(imds_agent_v2.ACCEPT_CONFIRM_WAIT_MS, 8000)
+        self.assertIn("#dcPopup\\:ctbAcceptMds", imds_agent_v2.CSS_ACCEPT_CONFIRM)
+        self.assertIn("//*[@id='dcPopup:ctbAcceptMds']/a/span", imds_agent_v2.XP_ACCEPT_CONFIRM)
+
+    def test_slow_accept_confirm_is_waited_for(self):
+        page = FakeAcceptSlowConfirmPage()
+        with mock.patch.object(imds_agent_v2, "save_screenshot"):
+            self.assertTrue(imds_agent_v2.accept_mds(page))
+        self.assertTrue(page.confirmed)
+        self.assertGreaterEqual(page.waited_ms - (page.accept_clicked_at or 0), 4000)
+
+    def test_no_mds_menu_fallback_while_dialog_up(self):
+        page = FakeAcceptLeftoverDialogPage()
+        page.dialog_up = True
+        self.assertFalse(imds_agent_v2._open_mds_file_menu(page))
+        self.assertNotIn("mds_menu", page.clicks)
+
+    def test_leftover_accept_dialog_is_cancelled_not_mds_menu_retried(self):
+        page = FakeAcceptLeftoverDialogPage()
+        with mock.patch.object(imds_agent_v2, "save_screenshot"):
+            self.assertFalse(imds_agent_v2.accept_mds(page))
+        self.assertFalse(page.confirmed)
+        self.assertTrue(page.cancelled)
+        self.assertIn("cancel", page.clicks)
+        self.assertEqual(page.clicks.count("mds_menu"), 1)
+
+    def test_missing_confirm_is_not_success(self):
+        page = FakeAcceptNoConfirmPage()
+        with mock.patch.object(imds_agent_v2, "save_screenshot"):
+            self.assertFalse(imds_agent_v2.accept_mds(page))
+        self.assertFalse(page.confirmed)
+
+    def test_leave_own_mds_uses_save_changes_no(self):
+        text = (ROOT / "imds_agent_v2.py").read_text(encoding="utf-8")
+        leave_fn = text.split("def leave_own_mds_for_inbox", 1)[1].split(
+            "\ndef navigate_to_search_page", 1
+        )[0]
+        self.assertIn('save_changes="no"', leave_fn)
+        self.assertIn("Leaving own MDS with save-changes No", leave_fn)
+        pass_fn = text.split("def accept_passed_mds", 1)[1].split(
+            "\ndef reject_failed_mds", 1
+        )[0]
+        self.assertIn("leave_own_mds_for_inbox", pass_fn)
+        reject_fn = text.split("def reject_failed_mds", 1)[1].split(
+            "\nINBOX_SEARCH_TAB", 1
+        )[0]
+        self.assertIn("leave_own_mds_for_inbox", reject_fn)
+
+    def test_dismiss_modal_before_inbox_wait(self):
+        text = (ROOT / "imds_agent_v2.py").read_text(encoding="utf-8")
+        nav_fn = text.split("def navigate_to_search_page", 1)[1].split(
+            "\ndef apply_not_yet_browsed_filter_and_search", 1
+        )[0]
+        self.assertLess(
+            nav_fn.find("_dismiss_nav_blockers"),
+            nav_fn.find("_try_search_nav_fast"),
+        )
+        blockers_fn = text.split("def _dismiss_nav_blockers", 1)[1].split(
+            "\ndef _try_search_nav_fast", 1
+        )[0]
+        self.assertIn("dismiss_modal", blockers_fn)
+        self.assertIn("BEFORE waiting for Inbox chrome", blockers_fn)
+
+    def test_search_nav_recovers_chrome_once_not_four_times_per_id(self):
+        imds_agent_v2.reset_search_nav_chrome_recovery()
+        page = FakeChromeGonePage()
+        order = []
+
+        def rec_dismiss(*_a, **_k):
+            order.append("dismiss")
+            return True
+
+        def rec_chrome(*_a, **_k):
+            order.append("chrome")
+            return False
+
+        with (
+            mock.patch.object(imds_agent_v2, "dismiss_modal", side_effect=rec_dismiss),
+            mock.patch.object(imds_agent_v2, "close_check_results_dialog"),
+            mock.patch.object(imds_agent_v2, "close_company_lookup_dialogs"),
+            mock.patch.object(imds_agent_v2, "wait_for_glass_pane_clear", return_value=True),
+            mock.patch.object(imds_agent_v2, "wait_for_imds_chrome", side_effect=rec_chrome),
+            mock.patch.object(imds_agent_v2, "imds_login") as login,
+            mock.patch.object(imds_agent_v2, "on_public_login_page", return_value=False),
+            mock.patch.object(imds_agent_v2, "logged_in_to_imds", return_value=True),
+            mock.patch.object(imds_agent_v2, "page_looks_offline", return_value=False),
+        ):
+            self.assertFalse(imds_agent_v2.navigate_to_search_page(page))
+            first_chrome = order.count("chrome")
+            first_goto = len(page.gotos)
+            self.assertGreaterEqual(order.count("dismiss"), 1)
+            self.assertLess(order.index("dismiss"), order.index("chrome"))
+            self.assertFalse(imds_agent_v2.navigate_to_search_page(page))
+            self.assertLessEqual(order.count("chrome") - first_chrome, 1)
+            self.assertEqual(len(page.gotos), first_goto)
+            login.assert_not_called()
+            self.assertGreaterEqual(first_goto, 1)
+            self.assertLessEqual(first_goto, 1)
 
 
 if __name__ == "__main__":

@@ -24,15 +24,15 @@ from imds_secrets import (
 class VaultTests(unittest.TestCase):
     def test_encrypt_roundtrip(self):
         payload = {
-            "IMDS_USERNAME": "user1",
-            "IMDS_PASSWORD": "pw",
+            "IMDS_USERNAME": "user1-plaintext-xyz",
+            "IMDS_PASSWORD": "s3cret-plaintext-password-xyz",
             "OTP_SECRET": "JBSWY3DPEHPK3PXP",
         }
         blob = encrypt_payload(payload, "master-passphrase")
-        self.assertNotIn("pw", blob)
-        self.assertNotIn("user1", blob)
+        self.assertNotIn("s3cret-plaintext-password-xyz", blob)
+        self.assertNotIn("user1-plaintext-xyz", blob)
         restored = decrypt_blob(blob, "master-passphrase")
-        self.assertEqual(restored["IMDS_USERNAME"], "user1")
+        self.assertEqual(restored["IMDS_USERNAME"], "user1-plaintext-xyz")
         self.assertEqual(restored["OTP_SECRET"], "JBSWY3DPEHPK3PXP")
 
     def test_wrong_master_key_fails(self):

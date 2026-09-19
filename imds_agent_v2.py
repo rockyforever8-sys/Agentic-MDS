@@ -23,9 +23,16 @@ After Forward, IMDS mints a new own-MDS ID (version 0.01). Contact person,
 Add Recipient, and Propose must finish on that new ID before the next
 received MDS is searched. If Forward did not mint a new ID, do not run
 recipients on the received sheet. Accept is not success until the
-pt_dcud / dcPopup confirm control is clicked. Forward action uses
-pt_cmiMenuForward only (never a leftover pt_dlgUserDialog). Inbox
-table chrome (Export / hidden column) is not an MDS ID.
+pt_dcud / dcPopup confirm control is clicked (wait for leftover
+dcPopup; never MDS-menu fallback while a dialog/glass pane is up —
+that click kills IMDS chrome). After Propose, leave the own MDS with
+save-changes No then Received MDSs. After one chrome-loss / failed
+search-nav, recover chrome once (dismiss leftover dialog, Received
+MDSs, MDS Request back) — do not 4-attempt-loop remaining IDs, do
+not treat search-nav as a 15-min network wait, and do not re-login
+on leftover Login DOM. Forward action uses pt_cmiMenuForward only
+(never a leftover pt_dlgUserDialog). Inbox table chrome (Export /
+hidden column) is not an MDS ID.
 Company lookup uses the newest lookupCompany iframe only. Leftover lookup
 dialogs are Cancelled (never JS-stripped). Do not Search an empty lookup.
 Fixed: GADSDL / SVHC Update notice — check the Rec001 acknowledgment box,
@@ -164,6 +171,10 @@ def is_inbox_or_search_nav_failure(exc_or_text) -> bool:
         "inbox not found",
         "could not return to the inbox list",
         "inbox row index shifted",
+        "not looping inbox",
+        "recovering imds chrome once",
+        "accept confirm missing",
+        "leftover accept dialog",
     )
     return any(n in text for n in needles)
 
@@ -190,12 +201,19 @@ def action_result_is_complete(action: str) -> bool:
 
 
 NUM_ITERATIONS = resolve_num_iterations()
+_SEARCH_NAV_CHROME_RECOVERED = False
 RECIPIENT_IDS = [x.strip() for x in os.getenv("RECIPIENT_COMPANY_IDS", "9994,293798").split(",") if x.strip()]
 DEFAULT_CONTACT_NAME = "Qu, Theresa"
 IMDS_USERNAME = os.getenv("IMDS_USERNAME", "")
 IMDS_PASSWORD = os.getenv("IMDS_PASSWORD", "")
 OTP_SECRET = os.getenv("OTP_SECRET", "")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+def reset_search_nav_chrome_recovery():
+    """Allow one heavy chrome recovery per live run (not per remaining MDS ID)."""
+    global _SEARCH_NAV_CHROME_RECOVERED
+    _SEARCH_NAV_CHROME_RECOVERED = False
 
 
 def load_live_credentials():
@@ -295,14 +313,66 @@ XP_ACCEPT_MENU = [
 ]
 XP_ACCEPT_MODAL = "//*[@id='dcPopup:ctbAcceptMds']/a/span"
 # Confirm lives in dcPopup or pt1:pt_dcud — not a page-wide Accept td.
+# Draft MDS 0.01 may mint dcPopup / pt_dcud:ctbAcceptMds / ctbAccept variants.
 XP_ACCEPT_CONFIRM = [
     XP_ACCEPT_MODAL,
     "//*[@id='dcPopup:ctbAcceptMds']/a",
     "//*[@id='dcPopup:ctbAcceptMds']",
+    "//*[@id='pt1:pt_dcud:ctbAcceptMds']/a/span",
+    "//*[@id='pt1:pt_dcud:ctbAcceptMds']/a",
+    "//*[@id='pt1:pt_dcud:ctbAcceptMds']",
     "//*[@id='pt1:pt_dcud:ctbAccept']/a/span",
     "//*[@id='pt1:pt_dcud:ctbAccept']/a",
     "//*[@id='pt1:pt_dcud:ctbAccept']",
+    "//*[@id='dcPopup:ctbAccept']/a/span",
+    "//*[@id='dcPopup:ctbAccept']/a",
+    "//*[@id='dcPopup:ctbAccept']",
 ]
+# Successful Accept finds confirm then waits ~10s after click; 2s is too short.
+ACCEPT_CONFIRM_WAIT_MS = 12000
+ACCEPT_CONFIRM_POLL_MS = 400
+XP_ACCEPT_CANCEL = [
+    "//*[@id='dcPopup:ctbCancel']/a/span",
+    "//*[@id='dcPopup:ctbCancel']/a",
+    "//*[@id='dcPopup:ctbCancel']",
+    "//*[@id='pt1:pt_dcud:ctbCancel']/a/span",
+    "//*[@id='pt1:pt_dcud:ctbCancel']/a",
+    "//*[@id='pt1:pt_dcud:ctbCancel']",
+]
+CSS_ACCEPT_CONFIRM = (
+    "#dcPopup\\:ctbAcceptMds",
+    "#dcPopup\\:ctbAcceptMds > a > span",
+    "#dcPopup\\:ctbAcceptMds > a",
+    "[id='dcPopup:ctbAcceptMds']",
+    "#pt1\\:pt_dcud\\:ctbAcceptMds",
+    "#pt1\\:pt_dcud\\:ctbAcceptMds > a > span",
+    "#pt1\\:pt_dcud\\:ctbAccept",
+    "#pt1\\:pt_dcud\\:ctbAccept > a > span",
+    "#pt1\\:pt_dcud\\:ctbAccept > a",
+    "#dcPopup a:has-text('Accept')",
+    "#dcPopup span:has-text('Accept')",
+    ".AFModalDialog #dcPopup\\:ctbAcceptMds",
+    ".AFModalDialog a:has-text('Accept MDS')",
+    "#pt1\\:pt_dcud a:has-text('Accept')",
+    "#pt1\\:pt_dcud input[value='Accept']",
+    "#pt1\\:pt_dcud button:has-text('Accept')",
+    "#pt1\\:pt_dcud\\:ctbOk",
+    "#pt1\\:pt_dcud\\:ctbOk > a",
+)
+CSS_ACCEPT_CANCEL = (
+    "#dcPopup\\:ctbCancel",
+    "#dcPopup\\:ctbCancel > a > span",
+    "#dcPopup\\:ctbCancel > a",
+    "[id='dcPopup:ctbCancel']",
+    "#pt1\\:pt_dcud\\:ctbCancel",
+    "#pt1\\:pt_dcud\\:ctbCancel > a > span",
+    "#pt1\\:pt_dcud\\:ctbCancel > a",
+    ".AFModalDialog button:has-text('Cancel'):visible",
+    "button:has-text('Cancel'):visible",
+    "a:has-text('Cancel'):visible",
+    "span:has-text('Cancel'):visible",
+    "input[value='Cancel']:visible",
+)
 XP_FORWARD_MENU = "//*[@id='pt1:pt_mMenuForward']"
 XP_FORWARD_ACTION1 = "//*[@id='pt1:pt_cmiMenuForward']/td[1]"
 XP_FORWARD_ACTION2 = "//*[@id='pt1:pt_cmiMenuForward']/td[2]"
@@ -1058,6 +1128,9 @@ def visible_dialog_text(page) -> str:
         ".AFModalDialog",
         "[id*='pt_dcud']",
         "#pt1\\:pt_dcud",
+        "#dcPopup",
+        "[id='dcPopup']",
+        "[id*='dcPopup']",
         ".p_AFModal",
         ".AFBlockingGlassPane",
     ):
@@ -1152,6 +1225,11 @@ def modal_dialog_visible(page) -> bool:
         "#pt1\\:pt_dcud\\:ctbNo",
         "#pt1\\:pt_dcud\\:ctbOk",
         "#pt1\\:pt_dcud\\:ctbCancel",
+        "#dcPopup",
+        "[id='dcPopup']",
+        "#dcPopup\\:ctbAcceptMds",
+        "[id='dcPopup:ctbAcceptMds']",
+        "#dcPopup\\:ctbCancel",
     ):
         if _locator_visible(page, sel):
             return True
@@ -1736,45 +1814,53 @@ def _search_id_field_ready(page) -> bool:
 
 
 def _click_received_mds_link(page) -> bool:
-    received_mds_link = page.locator("a:has-text('Received MDSs'):visible").first
-    if received_mds_link.count() == 0 or not received_mds_link.is_visible():
-        return False
-    received_mds_link.click()
-    log.info("Clicked 'Received MDSs' link.")
-    page.wait_for_timeout(800)
-    dismiss_modal(page, allow_escape=False, save_changes="no")
-    wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False, save_changes="no")
-    page.wait_for_load_state("networkidle", timeout=15000)
-    page.wait_for_timeout(1500)
-    if _search_id_field_ready(page):
-        log.info("Successfully navigated to search page via Received MDSs link.")
-        return True
-    if modal_dialog_visible(page):
-        dismiss_modal(page, allow_escape=False, save_changes="no")
+    try:
         received_mds_link = page.locator("a:has-text('Received MDSs'):visible").first
-        if received_mds_link.count() > 0:
-            received_mds_link.click()
-            page.wait_for_timeout(2000)
-            if _search_id_field_ready(page):
-                log.info("Successfully navigated to search page after dismissing save-changes.")
-                return True
-    return _search_id_field_ready(page)
+        if received_mds_link.count() == 0 or not received_mds_link.is_visible():
+            return False
+        received_mds_link.click(timeout=8000)
+        log.info("Clicked 'Received MDSs' link.")
+        page.wait_for_timeout(800)
+        dismiss_modal(page, allow_escape=False, save_changes="no")
+        wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False, save_changes="no")
+        wait_networkidle(page, 5000)
+        page.wait_for_timeout(800)
+        if _search_id_field_ready(page):
+            log.info("Successfully navigated to search page via Received MDSs link.")
+            return True
+        if modal_dialog_visible(page):
+            dismiss_modal(page, allow_escape=False, save_changes="no")
+            received_mds_link = page.locator("a:has-text('Received MDSs'):visible").first
+            if received_mds_link.count() > 0:
+                received_mds_link.click(timeout=8000)
+                page.wait_for_timeout(1500)
+                if _search_id_field_ready(page):
+                    log.info("Successfully navigated to search page after dismissing save-changes.")
+                    return True
+        return _search_id_field_ready(page)
+    except Exception as e:
+        log.warning(f"Received MDSs link failed: {e}")
+        return False
 
 
 def _click_received_mds_menu(page) -> bool:
-    back_btn = page.locator(f"xpath={XP_RECEIVED_MDS_MENU}")
-    if back_btn.count() == 0 or not back_btn.is_visible():
+    try:
+        back_btn = page.locator(f"xpath={XP_RECEIVED_MDS_MENU}")
+        if back_btn.count() == 0 or not back_btn.is_visible():
+            return False
+        back_btn.click(force=True, timeout=8000)
+        log.info("Clicked MDS Request tab (back).")
+        dismiss_modal(page, allow_escape=False, save_changes="no")
+        wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False, save_changes="no")
+        wait_networkidle(page, 5000)
+        page.wait_for_timeout(1200)
+        if _search_id_field_ready(page):
+            log.info("Successfully navigated to search page via back button.")
+            return True
         return False
-    back_btn.click(force=True)
-    log.info("Clicked MDS Request tab (back).")
-    dismiss_modal(page, allow_escape=False, save_changes="no")
-    wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False, save_changes="no")
-    page.wait_for_load_state("networkidle", timeout=15000)
-    page.wait_for_timeout(2000)
-    if _search_id_field_ready(page):
-        log.info("Successfully navigated to search page via back button.")
-        return True
-    return False
+    except Exception as e:
+        log.warning(f"MDS Request back failed: {e}")
+        return False
 
 
 def _click_inbox_mds(page) -> bool:
@@ -1796,8 +1882,8 @@ def _click_inbox_mds(page) -> bool:
             mds_item = dropdown.locator("a:has-text('MDS'):visible, li:has-text('MDS'):visible").first
     if mds_item.count() > 0 and mds_item.is_visible():
         mds_item.click()
-        page.wait_for_load_state("networkidle", timeout=15000)
-        page.wait_for_timeout(2000)
+        wait_networkidle(page, 8000)
+        page.wait_for_timeout(1500)
         log.info("Clicked 'MDS' from Inbox dropdown")
     else:
         log.warning("MDS item not found; waiting before retrying search navigation.")
@@ -1812,97 +1898,145 @@ def _click_inbox_mds(page) -> bool:
         return False
 
 
-def navigate_to_search_page(page):
-    log.info("Navigating to Received MDSs search page...")
-    close_check_results_dialog(page)
-    close_company_lookup_dialogs(page)
-    wait_for_imds_chrome(page)
-    # After a confirmed login, leftover Login DOM must not force a second OTP.
-    if on_public_login_page(page) and not logged_in_to_imds(page):
-        log.warning("Session is on the public login page; logging in again.")
-        imds_login(page)
-        wait_for_imds_chrome(page)
+def _dismiss_nav_blockers(page) -> None:
+    """Dismiss leftover Accept / save-changes BEFORE waiting for Inbox chrome."""
+    try:
+        close_check_results_dialog(page)
+    except Exception:
+        pass
+    try:
+        close_company_lookup_dialogs(page)
+    except Exception:
+        pass
     for _ in range(4):
-        dismiss_modal(page, allow_escape=False, save_changes="no")
-        page.wait_for_timeout(400)
+        try:
+            dismiss_modal(page, allow_escape=False, save_changes="no")
+        except Exception:
+            pass
+        try:
+            page.wait_for_timeout(400)
+        except Exception:
+            pass
         if not modal_dialog_visible(page):
             break
 
-    for attempt in range(1, 5):
-        try:
-            if _click_received_mds_link(page):
-                return True
-        except Exception as e:
-            log.warning(f"Error clicking Received MDSs link: {e}")
-        try:
-            if _click_received_mds_menu(page):
-                return True
-        except Exception as e:
-            log.warning(f"Error using back button: {e}")
-        inbox_ok = False
-        try:
-            inbox_ok = _click_inbox_mds(page)
-            if inbox_ok:
-                return True
-        except Exception as e:
-            log.warning(f"Error navigating to search page via Inbox: {e}")
-        # Inbox missing: use Received MDSs (the path that works in accept/reject).
-        # Do not only wait 4× on Inbox then reload.
-        if not inbox_ok:
-            log.info("Inbox missing; retrying Received MDSs link after chrome wait.")
-            wait_for_imds_chrome(page, timeout_ms=8000)
-            try:
-                if _click_received_mds_link(page) or _click_received_mds_menu(page):
-                    return True
-            except Exception as e:
-                log.warning(f"Error retrying Received MDSs after Inbox-missing: {e}")
-        log.info(f"Search page not ready yet (attempt {attempt}/4); waiting for IMDS chrome...")
-        wait_for_imds_chrome(page, timeout_ms=8000)
-        try:
-            page.wait_for_timeout(1000)
-        except Exception:
-            time.sleep(0.5)
 
-    log.info("All navigation methods failed; reloading main page and retrying...")
+def _try_search_nav_fast(page) -> bool:
+    """Received MDSs, MDS Request back, then Inbox — one pass, no 4× chrome wait."""
     try:
-        if on_public_login_page(page) and not logged_in_to_imds(page):
-            imds_login(page)
-            wait_for_imds_chrome(page)
-        else:
-            page.goto("https://www.mdsystem.com/imdsnt")
-            page.wait_for_load_state("networkidle", timeout=30000)
-            page.wait_for_timeout(3000)
-            wait_for_imds_chrome(page)
-            if on_public_login_page(page) and not logged_in_to_imds(page):
-                imds_login(page)
-                wait_for_imds_chrome(page)
+        if _click_received_mds_link(page):
+            return True
+    except Exception as e:
+        log.warning(f"Error clicking Received MDSs link: {e}")
+    try:
+        if _click_received_mds_menu(page):
+            return True
+    except Exception as e:
+        log.warning(f"Error using back button: {e}")
+    inbox_ok = False
+    try:
+        inbox_ok = _click_inbox_mds(page)
+        if inbox_ok:
+            return True
+    except Exception as e:
+        log.warning(f"Error navigating to search page via Inbox: {e}")
+    if not inbox_ok:
+        log.info("Inbox missing; retrying Received MDSs link after chrome wait.")
         try:
             if _click_received_mds_link(page) or _click_received_mds_menu(page):
                 return True
         except Exception as e:
-            log.warning(f"Error clicking Received MDSs after reload: {e}")
-        inbox_btn = page.locator("#pt1\\:pt_ctbToolBarInbound\\:\\:popEl")
-        if inbox_btn.count() == 0:
-            inbox_btn = page.locator("//*[@id='pt1:pt_ctbToolBarInbound::popEl']")
-        if inbox_btn.count() > 0 and inbox_btn.is_visible():
-            inbox_btn.click()
-            page.wait_for_timeout(1500)
-            mds_item = page.locator("#pt1\\:pt_cmiSearchInboxB")
-            if mds_item.count() == 0:
-                dropdown = page.locator("#pt1\\:pt_ctbToolBarInbound_Menu\\:\\:menu")
-                if dropdown.count() > 0:
-                    mds_item = dropdown.locator("a:has-text('MDS'):visible, li:has-text('MDS'):visible").first
-            if mds_item.count() > 0 and mds_item.is_visible():
-                mds_item.click()
-                page.wait_for_load_state("networkidle", timeout=15000)
-                page.wait_for_timeout(2000)
-                if _search_id_field_ready(page):
-                    log.info("Successfully navigated to search page after reload.")
-                    return True
-    except Exception as e:
-        log.warning(f"Reload fallback failed: {e}")
+            log.warning(f"Error retrying Received MDSs after Inbox-missing: {e}")
+    return _search_id_field_ready(page)
 
-    log.error("Failed to navigate to search page after all attempts.")
+
+def recover_imds_chrome_once(page) -> bool:
+    """After one chrome-loss, dismiss leftover dialog then Received MDSs / MDS Request.
+
+    Do not re-login on leftover Login DOM. Do not treat this as a 15-min network wait.
+    """
+    log.info("Recovering IMDS chrome once after search-nav / chrome loss...")
+    _dismiss_nav_blockers(page)
+    if _try_search_nav_fast(page):
+        return True
+    wait_for_imds_chrome(page, timeout_ms=8000)
+    if _try_search_nav_fast(page):
+        return True
+    if page_looks_offline(page):
+        log.warning("Page looks offline during chrome recovery; not treating search-nav as a 15-min wait.")
+        return False
+    if on_public_login_page(page) and not logged_in_to_imds(page):
+        log.warning(
+            "Leftover Login DOM during chrome recovery; not burning a second OTP."
+        )
+    else:
+        try:
+            log.info("Reloading IMDS main page once to restore chrome.")
+            page.goto(IMDS_HOME_URL)
+            wait_networkidle(page, 8000)
+            page.wait_for_timeout(1500)
+            wait_for_imds_chrome(page, timeout_ms=8000)
+        except Exception as e:
+            log.warning(f"Main-page reload during chrome recovery failed: {e}")
+    _dismiss_nav_blockers(page)
+    return _try_search_nav_fast(page)
+
+
+def leave_own_mds_for_inbox(page) -> bool:
+    """After Propose, discard leftover own MDS (save-changes No) then Received MDSs.
+
+    Do not sit 20s waiting for Inbox while a save-changes dialog is up.
+    """
+    log.info("Leaving own MDS with save-changes No, then Received MDSs.")
+    try:
+        close_check_results_dialog(page, any_check_overlay=True)
+    except Exception:
+        pass
+    dismiss_modal(page, allow_escape=False, save_changes="no")
+    wait_for_glass_pane_clear(page, timeout_ms=4000, allow_escape=False, save_changes="no")
+    if _search_id_field_ready(page):
+        return True
+    try:
+        if _click_received_mds_link(page):
+            return True
+    except Exception as e:
+        log.warning(f"Received MDSs after leave-own-MDS failed: {e}")
+    try:
+        if _click_received_mds_menu(page):
+            return True
+    except Exception as e:
+        log.warning(f"MDS Request back after leave-own-MDS failed: {e}")
+    return navigate_to_search_page(page)
+
+
+def navigate_to_search_page(page):
+    log.info("Navigating to Received MDSs search page...")
+    global _SEARCH_NAV_CHROME_RECOVERED
+    # Dismiss leftover Accept / save-changes BEFORE the long Inbox chrome wait.
+    _dismiss_nav_blockers(page)
+    # After a confirmed login, leftover Login DOM must not force a second OTP.
+    if page_looks_offline(page):
+        log.warning("Search-nav sees an offline page; not treating this as a 15-min network wait.")
+    elif on_public_login_page(page) and not logged_in_to_imds(page):
+        log.warning(
+            "Leftover Login DOM during search-nav; not burning a second OTP."
+        )
+    if _search_id_field_ready(page):
+        return True
+    if _try_search_nav_fast(page):
+        return True
+    if not _SEARCH_NAV_CHROME_RECOVERED:
+        _SEARCH_NAV_CHROME_RECOVERED = True
+        if recover_imds_chrome_once(page):
+            return True
+    else:
+        log.warning(
+            "Chrome already recovered once; not looping Inbox 4× for this ID."
+        )
+        _dismiss_nav_blockers(page)
+        if _try_search_nav_fast(page):
+            return True
+    log.error("Failed to navigate to search page after chrome recovery.")
     return False
 
 # ---------- Navigate and Filter ----------
@@ -2672,7 +2806,31 @@ def _click_xpath_if_present(page, xpath, *, hover_first: bool = False) -> bool:
         return False
 
 
+def _dialog_or_glass_up(page) -> bool:
+    """True when a modal, leftover dcPopup Accept dialog, or glass pane would steal clicks."""
+    try:
+        if modal_dialog_visible(page):
+            return True
+    except Exception:
+        pass
+    for sel in (
+        "#dcPopup\\:ctbAcceptMds",
+        "[id='dcPopup:ctbAcceptMds']",
+        "#dcPopup\\:ctbCancel",
+        "#dcPopup",
+        ".AFModalGlassPane",
+        ".AFBlockingGlassPane",
+        ".AFModalDialog",
+    ):
+        if _locator_visible(page, sel):
+            return True
+    return False
+
+
 def _open_mds_file_menu(page) -> bool:
+    if _dialog_or_glass_up(page):
+        log.warning("Not opening MDS menu while a dialog/glass pane is up.")
+        return False
     try:
         mds_menu = page.locator(f"xpath={XP_MDS_MENU}")
         if mds_menu.count() > 0 and mds_menu.is_visible():
@@ -2680,6 +2838,9 @@ def _open_mds_file_menu(page) -> bool:
             log.info("Clicked MDS menu (exact XPath).")
             page.wait_for_timeout(2000)
             return True
+        if _dialog_or_glass_up(page):
+            log.warning("Not using MDS-menu fallback while a dialog/glass pane is up.")
+            return False
         log.warning("MDS menu not found via exact XPath; trying fallback.")
         mds_menu = page.locator("a:has-text('MDS'):visible, #pt1\\:pt_mFile .x18v:visible").first
         if mds_menu.count() > 0:
@@ -2699,11 +2860,16 @@ def _dismiss_leftover_user_dialogs_before_mds_menu(page) -> None:
 
     GADSDL/SVHC: checkbox then OK. Ordinary notice: one OK. Never OK a GADSDL
     without the checkbox. Do not use Escape/glass as the only path.
+    Do not MDS-menu-click through a leftover Accept dcPopup.
     """
     try:
         dialog_text = visible_dialog_text(page) if modal_dialog_visible(page) else ""
         if is_gadsdl_svhc_update_prompt(dialog_text) or gadsdl_svhc_update_visible(page):
             acknowledge_gadsdl_svhc_update(page)
+            return
+        if _click_accept_confirm_control(page):
+            log.info("Clicked leftover Accept confirm before MDS menu.")
+            page.wait_for_timeout(1000)
             return
         if modal_dialog_visible(page):
             dismiss_modal(page, allow_escape=False, save_changes="no")
@@ -2735,15 +2901,7 @@ def _click_accept_confirm_control(page) -> bool:
         if _click_xpath_if_present(page, xp):
             log.info(f"Clicked Accept confirm via {xp}")
             return True
-    for sel in (
-        "#dcPopup\\:ctbAcceptMds",
-        "#pt1\\:pt_dcud\\:ctbAccept",
-        "#pt1\\:pt_dcud a:has-text('Accept')",
-        "#pt1\\:pt_dcud input[value='Accept']",
-        "#pt1\\:pt_dcud button:has-text('Accept')",
-        "#pt1\\:pt_dcud\\:ctbOk",
-        "#pt1\\:pt_dcud\\:ctbOk > a",
-    ):
+    for sel in CSS_ACCEPT_CONFIRM:
         try:
             loc = page.locator(sel).first
             if loc.count() > 0:
@@ -2755,43 +2913,121 @@ def _click_accept_confirm_control(page) -> bool:
     return False
 
 
+def _wait_and_click_accept_confirm(page, timeout_ms: int = ACCEPT_CONFIRM_WAIT_MS) -> bool:
+    """Poll leftover dcPopup / pt_dcud confirm — 2s is too short for draft 0.01 MDS."""
+    step = max(200, int(ACCEPT_CONFIRM_POLL_MS))
+    attempts = max(1, int(max(timeout_ms, step) / step))
+    for _ in range(attempts):
+        if _click_accept_confirm_control(page):
+            return True
+        try:
+            page.wait_for_selector(
+                "#dcPopup\\:ctbAcceptMds, [id='dcPopup:ctbAcceptMds'], "
+                "#pt1\\:pt_dcud\\:ctbAccept, #pt1\\:pt_dcud\\:ctbAcceptMds",
+                timeout=step,
+            )
+        except Exception:
+            try:
+                page.wait_for_timeout(step)
+            except Exception:
+                pass
+    return _click_accept_confirm_control(page)
+
+
+def _cancel_leftover_accept_dialog(page) -> bool:
+    """Restore chrome: prefer Accept confirm, else Cancel. Never MDS-menu through the glass."""
+    if _click_accept_confirm_control(page):
+        log.info("Clicked leftover Accept confirm instead of cancelling.")
+        return True
+    for xp in XP_ACCEPT_CANCEL:
+        if _click_xpath_if_present(page, xp):
+            log.info(f"Cancelled leftover Accept dialog via {xp}")
+            try:
+                page.wait_for_timeout(1000)
+            except Exception:
+                pass
+            return True
+    used = _click_first_matching(page, list(CSS_ACCEPT_CANCEL))
+    if used:
+        log.info(f"Cancelled leftover Accept dialog via {used}")
+        try:
+            page.wait_for_timeout(1000)
+        except Exception:
+            pass
+        return True
+    log.warning("Leftover Accept dialog could not be confirmed or cancelled.")
+    return False
+
+
+def _finish_accept_success(page) -> bool:
+    """After confirm click, wait like a successful Accept (~10s) for MDS accepted."""
+    try:
+        page.wait_for_timeout(2000)
+    except Exception:
+        pass
+    try:
+        page.wait_for_selector("text='MDS accepted'", timeout=8000)
+        log.info("Acceptance confirmed (success message found).")
+    except Exception:
+        log.info("Accept confirmation control was clicked.")
+    save_screenshot(page, "after_accept.png")
+    return True
+
+
 # ---------- Accept MDS ----------
 def accept_mds(page):
     log.info("Accepting MDS (PASS workflow) using exact XPaths...")
     for attempt in (1, 2):
+        if _dialog_or_glass_up(page):
+            log.info(
+                "Dialog already up before MDS menu; trying Accept confirm, not MDS-menu fallback."
+            )
+            if _wait_and_click_accept_confirm(page):
+                return _finish_accept_success(page)
+            _cancel_leftover_accept_dialog(page)
+            save_screenshot(page, "accept_confirm_missing.png")
+            return False
+
         _dismiss_leftover_user_dialogs_before_mds_menu(page)
+        if _dialog_or_glass_up(page):
+            log.warning("Dialog still up after leftover dismiss; not opening MDS menu.")
+            if _wait_and_click_accept_confirm(page):
+                return _finish_accept_success(page)
+            _cancel_leftover_accept_dialog(page)
+            save_screenshot(page, "accept_confirm_missing.png")
+            return False
+
         if not _open_mds_file_menu(page):
             save_screenshot(page, "mds_menu_not_found.png")
-            if attempt == 1:
+            if attempt == 1 and not _dialog_or_glass_up(page):
                 log.info("Retrying MDS menu + exact Accept once.")
                 continue
             return False
 
         if not _click_exact_accept_menu(page):
             log.warning("Accept not found via exact pt1:pt_cmiMenuAccept.")
-            if attempt == 1:
+            if attempt == 1 and not _dialog_or_glass_up(page):
                 log.info("Retrying MDS menu + exact Accept once.")
                 continue
             log.warning("Accept menu item not found.")
             save_screenshot(page, "accept_menu_item_not_found.png")
             return False
 
-        page.wait_for_timeout(2000)
-        confirmed = _click_accept_confirm_control(page)
-        if not confirmed:
-            log.warning("Accept modal button not found via exact XPath; confirmation did not complete.")
-            if _click_accept_confirm_control(page):
-                confirmed = True
-                log.info("Clicked leftover pt_dcud Accept confirm (not Escape/glass).")
+        confirmed = _wait_and_click_accept_confirm(page)
         if confirmed:
-            page.wait_for_timeout(2000)
-            try:
-                page.wait_for_selector("text='MDS accepted'", timeout=8000)
-                log.info("Acceptance confirmed (success message found).")
-            except Exception:
-                log.info("Accept confirmation control was clicked.")
-            save_screenshot(page, "after_accept.png")
-            return True
+            return _finish_accept_success(page)
+
+        log.warning("Accept modal button not found via exact XPath; confirmation did not complete.")
+        save_screenshot(page, "accept_confirm_missing.png")
+        if _dialog_or_glass_up(page):
+            log.warning(
+                "Leftover Accept dialog is up; not retrying MDS menu (that kills IMDS chrome)."
+            )
+            if _wait_and_click_accept_confirm(page):
+                return _finish_accept_success(page)
+            _cancel_leftover_accept_dialog(page)
+            save_screenshot(page, "accept_uncertain.png")
+            return False
 
         log.warning(
             "Accept confirmation did not complete; not treating a missing menu item as success."
@@ -2816,6 +3052,10 @@ def reject_mds(page):
                 menu_clicked = True
                 break
             else:
+                if _dialog_or_glass_up(page):
+                    log.warning("Not using MDS-menu fallback while a dialog/glass pane is up.")
+                    page.wait_for_timeout(1000)
+                    continue
                 log.warning(f"Attempt {attempt+1}: MDS menu not found, trying fallback.")
                 mds_menu = page.locator("a:has-text('MDS'):visible, #pt1\\:pt_mFile .x18v:visible").first
                 if mds_menu.count() > 0:
@@ -4384,6 +4624,8 @@ def accept_passed_mds(page, results):
             log.warning("Acceptance failed; skipping forwarding.")
             res["Action Result"] = "Accept Failed"
             save_check_summary(results)
+            if not leave_own_mds_for_inbox(page):
+                log.warning("Could not restore Received MDSs search after Accept Failed.")
             continue
 
         handle_forward_confirmation_modal(page)
@@ -4431,10 +4673,8 @@ def accept_passed_mds(page, results):
                 )
                 res["Action Result"] = "Forward Failed"
                 save_check_summary(results)
-                close_check_results_dialog(page)
-                if not navigate_to_search_page(page):
+                if not leave_own_mds_for_inbox(page):
                     log.warning("Could not return to Received MDSs search after Forward Failed.")
-                wait_for_glass_pane_clear(page, timeout_ms=4000, save_changes="no")
                 continue
 
         ok, recipient_msg = False, "Recipient assignment Failed"
@@ -4460,10 +4700,8 @@ def accept_passed_mds(page, results):
             log.warning("Recipient assignment incomplete.")
         save_check_summary(results)
 
-        close_check_results_dialog(page)
-        if not navigate_to_search_page(page):
+        if not leave_own_mds_for_inbox(page):
             log.warning("Could not return to Received MDSs search after propose; leftover MDS may remain open.")
-        wait_for_glass_pane_clear(page, timeout_ms=4000, save_changes="no")
 
     log.info("Acceptance, forwarding, and recipient assignment completed.")
 
@@ -4517,9 +4755,8 @@ def reject_failed_mds(page, results):
             res["Action Result"] = "Rejected"
         save_check_summary(results)
 
-        if not navigate_to_search_page(page):
+        if not leave_own_mds_for_inbox(page):
             log.warning("Could not return to Received MDSs search after reject.")
-        wait_for_glass_pane_clear(page, timeout_ms=4000, save_changes="no")
 
     log.info("Rejection of FAIL MDSs completed.")
 
@@ -4915,6 +5152,7 @@ def orchestrate():
         return _orchestrate_in_subprocess()
 
     load_live_credentials()
+    reset_search_nav_chrome_recovery()
     _ensure_chromium_os_deps()
     if sync_playwright is None:
         raise RuntimeError("playwright is not installed. In Colab, re-run Cell 1.")
