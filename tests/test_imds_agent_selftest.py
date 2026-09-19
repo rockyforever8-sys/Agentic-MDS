@@ -33,6 +33,13 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertIn("Save-changes prompt is showing", text)
         self.assertIn("def wait_for_forwarded_own_mds", text)
         self.assertIn("Completing contact, recipients, and propose on this new ID", text)
+        self.assertIn("Not completing contact/recipients/propose on the received sheet", text)
+        self.assertNotIn("on the open sheet anyway", text)
+        self.assertIn("def looks_like_inbox_table_chrome", text)
+        self.assertIn("def own_mds_ready_for_recipients", text)
+        self.assertIn("def ensure_inbox_row_opened_as_mds", text)
+        self.assertIn("pt1:pt_cmiMenuAccept", text)
+        self.assertNotIn("Accept button disappeared", text)
         self.assertNotIn("dropdown.count() == 0 or not dropdown.is_visible()", text)
         self.assertIn("retrying with all statuses", text)
         self.assertIn("not clicking Ingredients on the leftover sheet", text)
@@ -101,6 +108,26 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertIn("def ensure_ingredients_ready_for_check", text)
         self.assertIn("def is_searchable_mds_id", text)
         self.assertIn("Not searching invalid MDS ID", text)
+        accept_fn = text.split("def accept_mds", 1)[1].split("\ndef reject_mds", 1)[0]
+        self.assertIn("pt1:pt_cmiMenuAccept", accept_fn)
+        self.assertNotIn("td:has-text('Accept')", accept_fn)
+        self.assertNotIn("[role='menuitem']:has-text('Accept')", accept_fn)
+        fwd_fn = text.split("def _click_exact_forward_main", 1)[1].split(
+            "\ndef list_contact_option_names", 1
+        )[0]
+        self.assertNotIn("td:has-text('Forward')", fwd_fn)
+        self.assertNotIn("a:has-text('Forward')", fwd_fn)
+        self.assertNotIn("pt_dlgUserDialog", fwd_fn)
+        self.assertIn("pt1:pt_cmiMenuForward", fwd_fn)
+        process_fn = text.split("def process_rows_and_export", 1)[1].split(
+            "\ndef orchestrate", 1
+        )[0]
+        self.assertIn("not checking from the inbox table", process_fn)
+        pass_fn = text.split("def accept_passed_mds", 1)[1].split(
+            "\ndef reject_failed_mds", 1
+        )[0]
+        self.assertIn("leaving the inbox without Add Recipient", pass_fn)
+        self.assertIn("Forward Failed", pass_fn)
 
     def test_load_live_credentials_requires_secrets(self):
         saved = {k: os.environ.pop(k, None) for k in ("IMDS_USERNAME", "IMDS_PASSWORD", "OTP_SECRET", "IMDS_MASTER_KEY")}
@@ -1012,6 +1039,290 @@ class OrdinaryOkDialogTests(unittest.TestCase):
         self.assertTrue(imds_agent_v2.dismiss_modal(page, allow_escape=False))
         self.assertEqual(page.clicks.count("ok") + page.clicks.count("ok_span"), 1)
         self.assertFalse(page.modal_up)
+
+
+INBOX_CHROME = (
+    'Menu Export There are hidden column(s). You can show them using "View" button.'
+)
+
+
+class _KindLoc:
+    def __init__(self, page, kind, n=0, visible=False, text="", element_id=""):
+        self.page = page
+        self.kind = kind
+        self._n = n
+        self._visible = visible
+        self._text = text
+        self.element_id = element_id
+        self.first = self
+
+    def count(self):
+        return self._n
+
+    def is_visible(self):
+        return bool(self._visible and self._n > 0)
+
+    def click(self, force=False, timeout=5000):
+        self.page.clicks.append(self.kind or self.element_id or "unknown")
+        if self.kind == "accept_menu":
+            self.page.accept_menu_up = False
+        if self.kind == "confirm":
+            self.page.confirmed = True
+        if self.kind == "dialog_forward":
+            self.page.clicked_user_dialog = True
+        if self.kind == "inbox_row":
+            self.page.dblclicks += 1
+
+    def dblclick(self, force=False, timeout=5000):
+        self.page.dblclicks += 1
+
+    def hover(self, force=False, timeout=3000):
+        return None
+
+    def text_content(self, timeout=1500):
+        return self._text
+
+    def inner_text(self, timeout=500):
+        return self._text
+
+    def all(self):
+        return [self] if self._n else []
+
+    def locator(self, selector):
+        if "following-sibling" in (selector or ""):
+            return _KindLoc(
+                self.page, "id_neighbor", n=1, visible=True, text=self.page.id_neighbor
+            )
+        return _KindLoc(self.page, "none")
+
+    def nth(self, _i):
+        return self
+
+
+class FakeAcceptNoConfirmPage:
+    """MDS menu + pt_cmiMenuAccept; confirm control never appears (index 17 false success)."""
+
+    def __init__(self):
+        self.clicks = []
+        self.accept_menu_up = True
+        self.confirmed = False
+        self.url = "https://www.mdsystem.com/imdsnt"
+
+    def wait_for_timeout(self, _ms):
+        return None
+
+    def wait_for_load_state(self, *_a, **_k):
+        return None
+
+    def wait_for_selector(self, selector, **_k):
+        raise TimeoutError(selector)
+
+    def locator(self, selector: str):
+        s = (selector or "").lower().replace("\\", "")
+        if "lookupcompany" in s:
+            return _KindLoc(self, "none")
+        if "pt_mfile" in s or "has-text('mds')" in s:
+            return _KindLoc(self, "mds_menu", n=1, visible=True)
+        if "pt_cmimenuaccept" in s or "id='pt1:pt_cmimenuaccept'" in s:
+            n = 1 if self.accept_menu_up else 0
+            return _KindLoc(self, "accept_menu", n=n, visible=bool(n))
+        if "ctbacceptmds" in s or "ctbaccept" in s or "ctbok" in s:
+            return _KindLoc(self, "confirm", n=0)
+        if "pt_dcud" in s or "afmodal" in s:
+            return _KindLoc(self, "dialog", n=0)
+        if s.startswith("td:has-text('accept')") or s.startswith(
+            "[role='menuitem']:has-text('accept')"
+        ):
+            raise AssertionError(f"broad Accept locator must not be used: {selector}")
+        return _KindLoc(self, "none")
+
+
+class FakeForwardDialogPage:
+    """Forward action missing; leftover user-dialog td contains the word Forward."""
+
+    def __init__(self):
+        self.clicks = []
+        self.clicked_user_dialog = False
+        self.url = "https://www.mdsystem.com/imdsnt"
+
+    def wait_for_timeout(self, _ms):
+        return None
+
+    def wait_for_load_state(self, *_a, **_k):
+        return None
+
+    def locator(self, selector: str):
+        s = (selector or "").lower().replace("\\", "")
+        if "lookupcompany" in s:
+            return _KindLoc(self, "none")
+        if "pt_mfile" in s or "has-text('mds')" in s:
+            return _KindLoc(self, "mds_menu", n=1, visible=True)
+        if "pt_mmenuforward" in s:
+            return _KindLoc(self, "fwd_main", n=1, visible=True)
+        if "pt_cmimenuforward" in s or "pt_ctbforward" in s:
+            return _KindLoc(self, "fwd_action", n=0)
+        if "has-text('forward')" in s or "pt_dlguserdialog" in s:
+            return _KindLoc(
+                self,
+                "dialog_forward",
+                n=1,
+                visible=False,
+                element_id="pt1:pt_dcud:pt_dlgUserDialog::contentContainer",
+            )
+        if "pt_dcud" in s or "afmodal" in s:
+            return _KindLoc(self, "dialog", n=0)
+        if "ctbok" in s:
+            return _KindLoc(self, "ok", n=0)
+        return _KindLoc(self, "none")
+
+
+class FakeInboxChromeExtractPage:
+    def __init__(self, body=INBOX_CHROME, neighbor=INBOX_CHROME):
+        self.body = body
+        self.id_neighbor = neighbor
+        self.clicks = []
+        self.dblclicks = 0
+        self.url = "https://www.mdsystem.com/imdsnt"
+
+    def wait_for_timeout(self, _ms):
+        return None
+
+    def wait_for_selector(self, selector, timeout=10000):
+        return True
+
+    def locator(self, selector: str):
+        s = (selector or "")
+        sl = s.lower()
+        if sl == "td" or sl == "td:has-text('id / version')":
+            cell = _KindLoc(self, "id_label", n=1, visible=True, text="ID / Version")
+            return cell
+        if "tresult" in sl:
+            return _KindLoc(self, "tresult", n=1, visible=True)
+        if "ctbexpandall" in sl or "mds supplier" in sl or "treeitem" in sl:
+            return _KindLoc(self, "tree", n=0)
+        if sl == "body":
+            return _KindLoc(self, "body", n=1, visible=True, text=self.body)
+        return _KindLoc(self, "none")
+
+
+class FakeOwnMdsWaitPage:
+    def __init__(self, on_screen: str):
+        self.on_screen = on_screen
+        self.url = "https://www.mdsystem.com/imdsnt"
+
+    def wait_for_timeout(self, _ms):
+        return None
+
+    def locator(self, selector: str):
+        sl = (selector or "").lower()
+        if sl == "body":
+            return _KindLoc(self, "body", n=1, visible=True, text=self.on_screen)
+        if "id / version" in sl:
+            return _KindLoc(self, "id_label", n=1, visible=True, text=f"ID / Version {self.on_screen}")
+        if "lookupcompany" in sl or "pt_dcud" in sl or "afmodal" in sl:
+            return _KindLoc(self, "none")
+        return _KindLoc(self, "none")
+
+
+class AcceptForwardInboxTests(unittest.TestCase):
+    def test_inbox_table_chrome_is_not_mds_id(self):
+        self.assertTrue(imds_agent_v2.looks_like_inbox_table_chrome(INBOX_CHROME))
+        self.assertFalse(imds_agent_v2.looks_like_mds_id_value(INBOX_CHROME))
+        self.assertEqual(imds_agent_v2.parse_mds_id_number(INBOX_CHROME), "")
+        self.assertFalse(imds_agent_v2.is_searchable_mds_id(INBOX_CHROME))
+        self.assertTrue(imds_agent_v2.looks_like_mds_id_value("1470791560 / 1"))
+        self.assertFalse(imds_agent_v2.looks_like_mds_id_value("EXTRACTION_FAILED"))
+
+    def test_extract_rejects_inbox_table_chrome(self):
+        page = FakeInboxChromeExtractPage()
+        with mock.patch.object(imds_agent_v2, "save_screenshot"):
+            self.assertEqual(
+                imds_agent_v2.extract_mds_id_version_early(page), "EXTRACTION_FAILED"
+            )
+
+    def test_own_mds_gate_blocks_add_recipient_on_received_id(self):
+        self.assertFalse(
+            imds_agent_v2.own_mds_ready_for_recipients("1470791560", "1470791560 / 1")
+        )
+        self.assertTrue(
+            imds_agent_v2.own_mds_ready_for_recipients("1470791560", "1616000123 / 0.01")
+        )
+        page = FakeOwnMdsWaitPage("1470791560 / 1")
+        with (
+            mock.patch.object(imds_agent_v2, "dismiss_modal"),
+            mock.patch.object(imds_agent_v2, "read_visible_mds_id", return_value="1470791560 / 1"),
+            mock.patch.object(
+                imds_agent_v2, "extract_mds_id_version_early", return_value="1470791560 / 1"
+            ),
+        ):
+            self.assertEqual(
+                imds_agent_v2.wait_for_forwarded_own_mds(page, "1470791560", timeout_s=0.2),
+                "",
+            )
+
+    def test_accept_passed_skips_recipients_when_forward_did_not_mint(self):
+        results = [
+            {
+                "Overall Result": "PASS",
+                "MDS ID / Version": "1470791560 / 1",
+                "Action Result": "Pending action",
+                "Supplier Code": "",
+                "Part/Item No.": "1616-1YY0331-MT(A)",
+            }
+        ]
+        page = FakeImdsPage(present=("mds_menu", "inbox"))
+        with (
+            mock.patch.object(imds_agent_v2, "page_looks_offline", return_value=False),
+            mock.patch.object(imds_agent_v2, "on_public_login_page", return_value=False),
+            mock.patch.object(imds_agent_v2, "search_mds_by_id", return_value=True),
+            mock.patch.object(
+                imds_agent_v2, "open_first_result_on_content_page", return_value=True
+            ),
+            mock.patch.object(imds_agent_v2, "accept_mds", return_value=True),
+            mock.patch.object(imds_agent_v2, "handle_forward_confirmation_modal"),
+            mock.patch.object(imds_agent_v2, "wait_for_glass_pane_clear"),
+            mock.patch.object(
+                imds_agent_v2, "read_visible_mds_id", return_value="1470791560 / 1"
+            ),
+            mock.patch.object(
+                imds_agent_v2, "extract_mds_id_version_early", return_value="1470791560 / 1"
+            ),
+            mock.patch.object(imds_agent_v2, "wait_for_mds_content_page", return_value=True),
+            mock.patch.object(imds_agent_v2, "forward_mds", return_value=True) as fwd,
+            mock.patch.object(
+                imds_agent_v2, "wait_for_forwarded_own_mds", return_value=""
+            ),
+            mock.patch.object(imds_agent_v2, "complete_forward_recipients") as recip,
+            mock.patch.object(imds_agent_v2, "navigate_to_search_page", return_value=True),
+            mock.patch.object(imds_agent_v2, "save_check_summary"),
+            mock.patch.object(imds_agent_v2, "close_check_results_dialog"),
+            mock.patch.object(imds_agent_v2, "_dismiss_leftover_user_dialogs_before_mds_menu"),
+        ):
+            imds_agent_v2.accept_passed_mds(page, results)
+        recip.assert_not_called()
+        self.assertEqual(results[0]["Action Result"], "Forward Failed")
+        self.assertGreaterEqual(fwd.call_count, 2)
+
+    def test_accept_uses_exact_id_and_missing_confirm_is_not_success(self):
+        page = FakeAcceptNoConfirmPage()
+        with mock.patch.object(imds_agent_v2, "save_screenshot"):
+            with mock.patch.object(
+                imds_agent_v2, "_dismiss_leftover_user_dialogs_before_mds_menu"
+            ):
+                self.assertFalse(imds_agent_v2.accept_mds(page))
+        self.assertFalse(page.confirmed)
+        self.assertIn("accept_menu", page.clicks)
+        self.assertNotIn("disappeared", " ".join(page.clicks))
+
+    def test_forward_does_not_click_user_dialog(self):
+        page = FakeForwardDialogPage()
+        with mock.patch.object(imds_agent_v2, "save_screenshot"):
+            with mock.patch.object(
+                imds_agent_v2, "_dismiss_leftover_user_dialogs_before_mds_menu"
+            ):
+                self.assertFalse(imds_agent_v2.forward_mds(page))
+        self.assertFalse(page.clicked_user_dialog)
+        self.assertNotIn("dialog_forward", page.clicks)
 
 
 if __name__ == "__main__":

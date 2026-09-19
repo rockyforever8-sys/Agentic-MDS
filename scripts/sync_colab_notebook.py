@@ -71,6 +71,8 @@ A **GADSDL / SVHC Update** notice is dismissed by checking the Rec001 acknowledg
 
 After a lost inbox list, **Received MDSs** + re-filter; do not re-login.
 
+Accept is not success until the confirmation control is clicked (do not treat a disappeared Accept menu as done). Forward uses exact `pt_cmiMenuForward` only — never a leftover user-dialog td. If Forward did not mint a new own-MDS ID, leave the inbox without Add Recipient. Inbox-table chrome (Export / hidden column) is not an MDS ID; do not Check from the search list.
+
 Then click **Run IMDS until complete**. Output: `imds_output/check_summary.xlsx`.""",
             "md-intro",
         ),
