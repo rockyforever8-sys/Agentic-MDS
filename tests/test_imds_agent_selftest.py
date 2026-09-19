@@ -77,6 +77,13 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertIn("def should_wait_for_network_recovery", text)
         self.assertIn("waiting for Received MDSs / MDS menu", text)
         self.assertIn("could not navigate to search page", text)
+        self.assertIn("def is_gadsdl_svhc_update_prompt", text)
+        self.assertIn("def acknowledge_gadsdl_svhc_update", text)
+        self.assertIn("GADSDL / SVHC", text)
+        login_fn = text.split("def imds_login", 1)[1].split("\ndef _sel_count", 1)[0]
+        self.assertIn("dismiss_modal", login_fn)
+        nav_src = text.split("def navigate_to_search_page", 1)[1].split("\ndef navigate_and_filter", 1)[0]
+        self.assertIn("dismiss_modal", nav_src)
         inbox_fn = text.split("def _click_inbox_mds", 1)[1].split("\ndef navigate_to_search_page", 1)[0]
         self.assertNotIn("go_back()", inbox_fn)
         self.assertNotIn("trying to go back", inbox_fn)
@@ -153,6 +160,27 @@ class ForwardPromptHelpers(unittest.TestCase):
         self.assertTrue(imds_agent_v2.is_save_changes_prompt("MDS - MATERIAL DATA SYSTEM\nDo you want to save your changes?\nYes\nNo\nCancel"))
         self.assertFalse(imds_agent_v2.is_save_changes_prompt("Do you want to forward the new version as well?"))
         self.assertFalse(imds_agent_v2.is_save_changes_prompt("Clicked Inbox button"))
+
+    def test_detects_gadsdl_svhc_update_prompt(self):
+        wrapped = (
+            "GADSDL / SVHC Update\n"
+            "GADSL / SVHC has been updated.\n"
+            "I understand that a new version of all materials using jokers to hide one of the\n"
+            "updated substances has to be created and released to the supply chain according\n"
+            "to Rec001 Rule 3.2.1.D.\n"
+            "OK\nCancel"
+        )
+        self.assertTrue(imds_agent_v2.is_gadsdl_svhc_update_prompt(wrapped))
+        self.assertTrue(
+            imds_agent_v2.is_gadsdl_svhc_update_prompt(
+                "GADSL / SVHC Update  I understand  Rec001 Rule 3.2.1.D."
+            )
+        )
+        self.assertFalse(imds_agent_v2.is_gadsdl_svhc_update_prompt("Do you want to save your changes?"))
+        self.assertFalse(imds_agent_v2.is_gadsdl_svhc_update_prompt("Clicked Inbox button"))
+        self.assertFalse(
+            imds_agent_v2.should_js_strip_modal(lookup_iframes=0, dialog_text=wrapped, yes_no=False)
+        )
 
     def test_mds_id_matches_numeric_id_only(self):
         self.assertTrue(imds_agent_v2.mds_id_matches("1522070544 / 2", "1522070544"))
@@ -550,6 +578,199 @@ class PostLoginSessionTests(unittest.TestCase):
                 os.environ.pop("IMDS_ALLOW_TEN", None)
             else:
                 os.environ["IMDS_ALLOW_TEN"] = saved_ten
+
+
+GADSDL_DIALOG_TEXT = (
+    "GADSDL / SVHC Update\n"
+    "GADSL / SVHC has been updated on 19/11/2026. All affected confidential substances "
+    "have already been revealed.\n"
+    "I understand that a new version of all materials using jokers to hide one of the "
+    "updated substances has to be created and released to the supply chain according to "
+    "Rec001 Rule 3.2.1.D.\n"
+    "OK\nCancel\nExport"
+)
+
+
+class _FakeGadsdlLocator:
+    def __init__(self, page: "FakeGadsdlDialogPage", kind: str):
+        self.page = page
+        self.kind = kind
+        self.first = self
+
+    def count(self) -> int:
+        if self.kind == "lookup":
+            return 0
+        if self.kind in {"inbox", "received_menu", "received_link", "mds_menu", "org"}:
+            return 1 if self.kind in self.page.chrome else 0
+        if self.kind in {"username", "forgotten", "login_link", "login_button", "user_id_label"}:
+            return 1
+        if self.kind in {
+            "dialog",
+            "gadsdl",
+            "checkbox",
+            "ok",
+            "cancel",
+            "export",
+            "glass",
+        }:
+            return 1 if self.page.modal_up else 0
+        if self.kind == "body":
+            return 1
+        return 0
+
+    def is_visible(self) -> bool:
+        return self.count() > 0
+
+    def is_checked(self) -> bool:
+        if self.kind != "checkbox":
+            raise AttributeError("not a checkbox")
+        return bool(self.page.checkbox_checked)
+
+    def inner_text(self, timeout: int = 500) -> str:
+        if self.kind == "body":
+            public = "Login\nLanguage\nUser ID forgotten\n"
+            return public + (GADSDL_DIALOG_TEXT if self.page.modal_up else "")
+        if self.kind in {"dialog", "gadsdl", "glass"} and self.page.modal_up:
+            return GADSDL_DIALOG_TEXT
+        return ""
+
+    def click(self, force: bool = False, timeout: int = 4000):
+        self.page.clicks.append(self.kind)
+        if self.kind == "checkbox":
+            self.page.checkbox_checked = True
+            return
+        if self.kind == "ok":
+            if not self.page.checkbox_checked:
+                raise RuntimeError("OK is disabled until the acknowledgment checkbox is checked")
+            self.page.modal_up = False
+            return
+        if self.kind == "cancel":
+            self.page.modal_up = False
+            return
+        if self.kind == "export":
+            return
+
+    def locator(self, _selector: str):
+        return _FakeGadsdlLocator(self.page, "none")
+
+
+class FakeGadsdlDialogPage:
+    """Playwright stand-in: public Login chrome behind a GADSDL / SVHC Update dialog."""
+
+    def __init__(self, *, modal_up: bool = True, checkbox_checked: bool = False, chrome=()):
+        self.modal_up = modal_up
+        self.checkbox_checked = checkbox_checked
+        self.chrome = set(chrome)
+        self.clicks: list[str] = []
+        self.url = "https://www.mdsystem.com/imdsnt"
+
+    def wait_for_timeout(self, _ms: int):
+        return None
+
+    def wait_for_selector(self, _selector: str, state: str | None = None, timeout: int = 8000):
+        if state == "detached" and self.modal_up:
+            raise TimeoutError("GADSDL dialog still attached")
+        return None
+
+    def evaluate(self, _script):
+        return None
+
+    class _Keyboard:
+        def press(self, _key: str):
+            return None
+
+    @property
+    def keyboard(self):
+        return FakeGadsdlDialogPage._Keyboard()
+
+    def locator(self, selector: str):
+        return _FakeGadsdlLocator(self, self._kind(selector or ""))
+
+    @staticmethod
+    def _kind(sel: str) -> str:
+        s = sel.lower()
+        if "lookupcompany" in s:
+            return "lookup"
+        if "pt_ctbtoolbarinbound" in s and "menu" not in s:
+            return "inbox"
+        if "pt_cmisearchinboxb" in s:
+            return "inbox"
+        if "sdiinboxsearch" in s:
+            return "received_menu"
+        if "received mdss" in s:
+            return "received_link"
+        if "pt_mfile" in s:
+            return "mds_menu"
+        if "johnson electric" in s:
+            return "org"
+        if "user id forgotten" in s:
+            return "forgotten"
+        if "username" in s or "userid" in s.replace(" ", ""):
+            return "username"
+        if "user id" in s:
+            return "user_id_label"
+        if "button:has-text('login')" in s or ("input[value" in s and "login" in s):
+            return "login_button"
+        if "a:has-text('login')" in s:
+            return "login_link"
+        if "ctbcancel" in s or "has-text('cancel')" in s or "value='cancel'" in s:
+            return "cancel"
+        if "export" in s:
+            return "export"
+        if "ctbyes" in s or "has-text('yes')" in s:
+            return "none"
+        if "ctbno" in s or "has-text('no')" in s:
+            return "none"
+        if "checkbox" in s or "i understand" in s:
+            return "checkbox"
+        if "gadsdl" in s or "gadsl" in s or "svhc" in s or "rec001" in s:
+            return "gadsdl"
+        if "ctbok" in s or "has-text('ok')" in s or "value='ok'" in s:
+            return "ok"
+        if "contains(normalize-space(.), 'ok')" in s and "cancel" not in s:
+            return "ok"
+        if "afmodalglasspane" in s or "afblockingglasspane" in s:
+            return "glass"
+        if "afmodaldialog" in s or "pt_dcud" in s:
+            return "dialog"
+        if s == "body":
+            return "body"
+        return "none"
+
+
+class GadsdlSvhcModalTests(unittest.TestCase):
+    def test_dismiss_checks_box_then_ok_not_cancel(self):
+        page = FakeGadsdlDialogPage()
+        self.assertTrue(imds_agent_v2.gadsdl_svhc_update_visible(page))
+        self.assertTrue(imds_agent_v2.modal_dialog_visible(page))
+        self.assertTrue(imds_agent_v2.dismiss_modal(page, allow_escape=False))
+        self.assertIn("checkbox", page.clicks)
+        self.assertIn("ok", page.clicks)
+        self.assertNotIn("cancel", page.clicks)
+        self.assertNotIn("export", page.clicks)
+        self.assertLess(page.clicks.index("checkbox"), page.clicks.index("ok"))
+        self.assertFalse(page.modal_up)
+        self.assertFalse(imds_agent_v2.gadsdl_svhc_update_visible(page))
+
+    def test_already_checked_only_clicks_ok(self):
+        page = FakeGadsdlDialogPage(checkbox_checked=True)
+        self.assertTrue(imds_agent_v2.acknowledge_gadsdl_svhc_update(page))
+        self.assertEqual(page.clicks, ["ok"])
+        self.assertNotIn("cancel", page.clicks)
+
+    def test_login_page_detection_with_gadsdl_overlay(self):
+        overlay = FakeGadsdlDialogPage()
+        self.assertFalse(imds_agent_v2.on_public_login_page(overlay))
+        self.assertFalse(imds_agent_v2.logged_in_to_imds(overlay))
+        self.assertTrue(imds_agent_v2.dismiss_modal(overlay, allow_escape=False))
+        self.assertTrue(imds_agent_v2.on_public_login_page(overlay))
+        self.assertFalse(imds_agent_v2.logged_in_to_imds(overlay))
+
+        public = FakeGadsdlDialogPage(modal_up=False)
+        self.assertTrue(imds_agent_v2.on_public_login_page(public))
+
+        leftover_login = FakeImdsPage(present=("inbox", "login_link", "username", "forgotten"))
+        self.assertFalse(imds_agent_v2.on_public_login_page(leftover_login))
 
 
 if __name__ == "__main__":

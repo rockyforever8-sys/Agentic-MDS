@@ -24,6 +24,9 @@ Add Recipient, and Propose must finish on that new ID before the next
 received MDS is searched.
 Company lookup uses the newest lookupCompany iframe only. Leftover lookup
 dialogs are Cancelled (never JS-stripped). Do not Search an empty lookup.
+Fixed: GADSDL / SVHC Update notice — check the Rec001 acknowledgment box,
+then OK (never Cancel or Export). Public Login chrome behind that modal is
+not the public login page.
 """
 
 import os
@@ -361,6 +364,21 @@ XP_MODAL_YES = [
     "//*[@id='pt1:pt_dcud:ctbYes']",
     "//*[contains(@id,'ctbYes')]/a",
 ]
+# GADSDL / SVHC Update: checkbox then OK (ADF ids match other pt_dcud dialogs).
+XP_GADSDL_ACK_CHECKBOX = [
+    "//label[contains(normalize-space(.), 'I understand')]//input[@type='checkbox']",
+    "//*[contains(normalize-space(.), 'I understand') and contains(normalize-space(.), 'Rec001')]"
+    "//input[@type='checkbox']",
+    "//input[@type='checkbox'][following::*[contains(normalize-space(.), 'I understand')][1]]",
+    "//label[contains(normalize-space(.), 'I understand')]",
+]
+XP_GADSDL_OK = [
+    "//*[@id='pt1:pt_dcud:ctbOk']/a",
+    "//*[@id='pt1:pt_dcud:ctbOk']/a/span",
+    "//*[@id='pt1:pt_dcud:ctbOk']",
+    "//*[contains(@id,'ctbOk')]/a",
+    "//a[contains(normalize-space(.), 'OK') and not(contains(normalize-space(.), 'Cancel'))]",
+]
 
 
 def is_forward_previous_version_prompt(text: str) -> bool:
@@ -387,6 +405,30 @@ def is_empty_search_criteria_prompt(text: str) -> bool:
     """True for IMDS 'Please enter at least one search criteria!' on an empty lookup."""
     t = " ".join((text or "").lower().split())
     return "at least one search criteria" in t or "enter at least one search" in t
+
+
+def is_gadsdl_svhc_update_prompt(text: str) -> bool:
+    """True for the GADSDL / SVHC Update acknowledgment dialog (Wong 2026-09-19).
+
+    Title may wrap as 'GADSDL / SVHC' or 'GADSL / SVHC'. The checkbox text
+    includes 'I understand', jokers, and Rec001 Rule 3.2.1.D.
+    """
+    t = " ".join((text or "").lower().split())
+    if not t:
+        return False
+    if is_save_changes_prompt(t) or is_forward_previous_version_prompt(t):
+        return False
+    if is_empty_search_criteria_prompt(t) or is_check_errors_blocking_prompt(t):
+        return False
+    has_list = "gadsdl" in t or "gadsl" in t or "svhc" in t
+    has_ack = (
+        "i understand" in t
+        or "rec001" in t
+        or "rec 001" in t
+        or "joker" in t
+        or "updated substances" in t
+    )
+    return has_list and has_ack
 
 
 def recipient_id_in_text(tree_text: str, company_id: str) -> bool:
@@ -561,6 +603,8 @@ def should_js_strip_modal(*, lookup_iframes: int, dialog_text: str = "", yes_no:
         return False
     if is_check_results_overlay_text(dialog_text):
         return False
+    if is_gadsdl_svhc_update_prompt(dialog_text):
+        return False
     return True
 
 
@@ -662,6 +706,8 @@ def imds_login(page):
         log.error(f"Failed to load login page: {e}")
         raise
 
+    dismiss_modal(page, allow_escape=False)
+
     try:
         login_link = page.locator("a:has-text('Login'):visible").first
         if login_link.count() > 0:
@@ -740,6 +786,7 @@ def imds_login(page):
         raise RuntimeError("Login failed.")
     log.info("Login successful.")
     save_screenshot(page, "01_after_login.png")
+    dismiss_modal(page, allow_escape=False)
     wait_for_imds_chrome(page)
 
 
@@ -795,6 +842,9 @@ def on_public_login_page(page) -> bool:
     """
     try:
         if imds_chrome_present(page):
+            return False
+        # Public Login chrome behind GADSDL / SVHC Update is not the login form.
+        if gadsdl_svhc_update_visible(page):
             return False
         user_id_active = (
             _sel_visible(page, "#username")
@@ -1002,7 +1052,91 @@ def modal_dialog_visible(page) -> bool:
     ):
         if _locator_visible(page, sel):
             return True
+    if gadsdl_svhc_update_visible(page):
+        return True
     return False
+
+
+def gadsdl_svhc_update_visible(page) -> bool:
+    """True when the GADSDL / SVHC Update acknowledgment dialog is on screen."""
+    for sel in (
+        "text=GADSDL / SVHC",
+        "text=GADSL / SVHC",
+        "xpath=//*[contains(normalize-space(.), 'GADSDL') and contains(normalize-space(.), 'SVHC')]",
+        "xpath=//*[contains(normalize-space(.), 'I understand') and contains(normalize-space(.), 'Rec001')]",
+    ):
+        if _locator_visible(page, sel):
+            return True
+    try:
+        return is_gadsdl_svhc_update_prompt(visible_dialog_text(page))
+    except Exception:
+        return False
+
+
+def _check_gadsdl_ack_box(page) -> bool:
+    """Tick the Rec001 'I understand' checkbox if it is present and unchecked."""
+    selectors = list(XP_GADSDL_ACK_CHECKBOX) + [
+        "input[type='checkbox']",
+        "text=I understand",
+    ]
+    for sel in selectors:
+        try:
+            loc = page.locator(f"xpath={sel}").first if sel.startswith("//") else page.locator(sel).first
+            if loc.count() == 0 or not loc.is_visible():
+                continue
+            try:
+                if loc.is_checked():
+                    log.info("GADSDL acknowledgment checkbox already checked.")
+                    return True
+            except Exception:
+                pass
+            loc.click(force=True, timeout=4000)
+            log.info(f"Checked GADSDL acknowledgment via {sel}")
+            return True
+        except Exception:
+            continue
+    log.warning("GADSDL acknowledgment checkbox was not found.")
+    return False
+
+
+def acknowledge_gadsdl_svhc_update(page) -> bool:
+    """Check the Rec001 joker acknowledgment, then click OK. Never Cancel or Export."""
+    if not gadsdl_svhc_update_visible(page):
+        return False
+    log.info("GADSDL / SVHC Update dialog is showing; checking acknowledgment, then OK.")
+    _check_gadsdl_ack_box(page)
+    try:
+        page.wait_for_timeout(400)
+    except Exception:
+        pass
+    used = _click_first_matching(
+        page,
+        [
+            "#pt1\\:pt_dcud\\:ctbOk",
+            "#pt1\\:pt_dcud\\:ctbOk > a > span",
+            "#pt1\\:pt_dcud\\:ctbOk > a",
+        ]
+        + list(XP_GADSDL_OK)
+        + [
+            "button:has-text('OK'):visible",
+            "input[value='OK']:visible",
+            "a:has-text('OK'):visible",
+            "span:has-text('OK'):visible",
+        ],
+    )
+    if not used:
+        log.warning("GADSDL / SVHC OK button was not found.")
+        return False
+    log.info(f"Clicked OK on GADSDL / SVHC Update via {used}")
+    try:
+        page.wait_for_timeout(1000)
+    except Exception:
+        pass
+    try:
+        page.wait_for_selector(".AFModalGlassPane, .AFModalDialog", state="detached", timeout=8000)
+    except Exception:
+        pass
+    return not gadsdl_svhc_update_visible(page)
 
 
 def yes_no_buttons_visible(page) -> bool:
@@ -1268,11 +1402,17 @@ def dismiss_modal(page, allow_escape: bool = True, save_changes: str = "yes"):
         close_company_lookup_dialogs(page)
         if lookup_company_iframe_count(page) == 0 and not modal_dialog_visible(page):
             return True
+    if acknowledge_gadsdl_svhc_update(page):
+        return True
     if not modal_dialog_visible(page):
         log.info("No glass pane, no modal.")
         return True
     log.info("Modal dialog detected.")
     dialog_text = visible_dialog_text(page)
+    if is_gadsdl_svhc_update_prompt(dialog_text):
+        log.info("GADSDL / SVHC Update still showing after first pass; retrying checkbox then OK.")
+        if acknowledge_gadsdl_svhc_update(page):
+            return True
     glass = page.locator(".AFModalGlassPane, .AFBlockingGlassPane")
 
     if is_forward_previous_version_prompt(dialog_text):
