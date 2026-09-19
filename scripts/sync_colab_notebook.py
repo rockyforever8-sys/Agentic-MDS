@@ -10,7 +10,9 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-REF = "cursor/row5-inbox-recover-07ca"
+BRANCH = "cursor/row5-inbox-recover-07ca"
+PINNED_SHA = "70ac29307a6c70ffefa9c0c4c75ca44b7fe7c791"
+REF = PINNED_SHA
 
 
 def as_source_lines(text: str) -> list[str]:
@@ -82,27 +84,18 @@ import os, pathlib, subprocess, sys
 
 ROOT = pathlib.Path("/content/Agentic-MDS")
 REPO = "https://github.com/rockyforever8-sys/Agentic-MDS.git"
-REF = os.environ.get("IMDS_GIT_REF", "{REF}")
+BRANCH = "{BRANCH}"
+PIN = "{PINNED_SHA}"
+REF = os.environ.get("IMDS_GIT_REF", PIN)
 if not (ROOT / ".git").exists():
-    try:
-        subprocess.check_call(["git", "clone", "--depth", "1", "--branch", REF, REPO, str(ROOT)])
-    except subprocess.CalledProcessError:
-        subprocess.check_call(["git", "clone", "--depth", "1", REPO, str(ROOT)])
+    subprocess.check_call(["git", "clone", "--depth", "50", "--branch", BRANCH, REPO, str(ROOT)])
 else:
-    fetched = False
-    for _ref in (REF, "main"):
-        try:
-            subprocess.check_call(["git", "-C", str(ROOT), "fetch", "--depth", "1", "origin", _ref])
-            subprocess.check_call(["git", "-C", str(ROOT), "checkout", "-B", _ref, f"origin/{{_ref}}"])
-            fetched = True
-            break
-        except subprocess.CalledProcessError:
-            print("Could not fetch origin/" + _ref)
-    if not fetched:
-        raise RuntimeError("git fetch failed")
+    subprocess.check_call(["git", "-C", str(ROOT), "fetch", "--depth", "50", "origin", BRANCH])
 os.chdir(ROOT)
+subprocess.check_call(["git", "checkout", "--detach", REF])
 print("Working directory:", os.getcwd())
-print("git HEAD:", subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip())
+print("git HEAD:", subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip())
+print("cloned branch:", BRANCH, "pinned:", PIN)
 
 %pip install -q playwright pandas openpyxl nest_asyncio pyotp cryptography ipywidgets
 !python -m playwright install-deps chromium
