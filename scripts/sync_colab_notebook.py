@@ -11,7 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BRANCH = "cursor/row5-inbox-recover-07ca"
-PINNED_SHA = "70ac29307a6c70ffefa9c0c4c75ca44b7fe7c791"
+PINNED_SHA = "8e1eb4ceeb568e5e730bebf12c37bfbf3b436c2a"
 REF = PINNED_SHA
 
 
@@ -73,7 +73,7 @@ A **GADSDL / SVHC Update** notice is dismissed by checking the Rec001 acknowledg
 
 After a lost inbox list, **Received MDSs** + re-filter; do not re-login.
 
-Accept is not success until the confirmation control is clicked (do not treat a disappeared Accept menu as done). Forward uses exact `pt_cmiMenuForward` only — never a leftover user-dialog td. If Forward did not mint a new own-MDS ID, leave the inbox without Add Recipient. Inbox-table chrome (Export / hidden column) is not an MDS ID; do not Check from the search list.
+Accept is not success until the confirmation control is clicked (do not treat a disappeared Accept menu as done). Wait for leftover `dcPopup:ctbAcceptMds` rather than retrying MDS menu through a dialog — that click kills Inbox chrome. After one chrome-loss, recover once via Received MDSs / MDS Request back; do not 4-attempt-loop remaining IDs and do not treat search-nav as a 15-min network drop. Forward uses exact `pt_cmiMenuForward` only — never a leftover user-dialog td. If Forward did not mint a new own-MDS ID, leave the inbox without Add Recipient. Inbox-table chrome (Export / hidden column) is not an MDS ID; do not Check from the search list.
 
 Then click **Run IMDS until complete**. Output: `imds_output/check_summary.xlsx`.""",
             "md-intro",

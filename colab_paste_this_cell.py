@@ -7,7 +7,7 @@ import os, pathlib, subprocess
 ROOT = pathlib.Path("/content/Agentic-MDS")
 REPO = "https://github.com/rockyforever8-sys/Agentic-MDS.git"
 BRANCH = "cursor/row5-inbox-recover-07ca"
-PIN = "70ac29307a6c70ffefa9c0c4c75ca44b7fe7c791"
+PIN = "8e1eb4ceeb568e5e730bebf12c37bfbf3b436c2a"
 REF = os.environ.get("IMDS_GIT_REF", PIN)
 if not (ROOT / ".git").exists():
     subprocess.check_call(["git", "clone", "--depth", "50", "--branch", BRANCH, REPO, str(ROOT)])
