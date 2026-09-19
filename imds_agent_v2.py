@@ -21,7 +21,18 @@ status is unchecked, so search-by-ID returns 0 rows. All-status retry clicks
 Combined All (never Combined None with zero Single boxes).
 After Forward, IMDS mints a new own-MDS ID (version 0.01). Contact person,
 Add Recipient, and Propose must finish on that new ID before the next
-received MDS is searched.
+received MDS is searched. If Forward did not mint a new ID, do not run
+recipients on the received sheet. Accept is not success until the
+pt_dcud / dcPopup confirm control is clicked (wait for leftover
+dcPopup; never MDS-menu fallback while a dialog/glass pane is up —
+that click kills IMDS chrome). After Propose, leave the own MDS with
+save-changes No then Received MDSs. After one chrome-loss / failed
+search-nav, recover chrome once (dismiss leftover dialog, Received
+MDSs, MDS Request back) — do not 4-attempt-loop remaining IDs, do
+not treat search-nav as a 15-min network wait, and do not re-login
+on leftover Login DOM. Forward action uses pt_cmiMenuForward only
+(never a leftover pt_dlgUserDialog). Inbox table chrome (Export /
+hidden column) is not an MDS ID.
 Company lookup uses the newest lookupCompany iframe only. Leftover lookup
 dialogs are Cancelled (never JS-stripped). Do not Search an empty lookup.
 Fixed: GADSDL / SVHC Update notice — check the Rec001 acknowledgment box,
@@ -148,12 +159,31 @@ def is_transient_network_error(exc_or_text) -> bool:
     return any(n in text for n in needles)
 
 
+def is_inbox_or_search_nav_failure(exc_or_text) -> bool:
+    """True for Inbox-missing / search-page navigation failure — not a network drop."""
+    text = str(exc_or_text or "").lower()
+    needles = (
+        "could not navigate to search page",
+        "failed to navigate to search page",
+        "search page not ready",
+        "could not return to the inbox",
+        "inbox button not found",
+        "inbox not found",
+        "could not return to the inbox list",
+        "inbox row index shifted",
+        "not looping inbox",
+        "recovering imds chrome once",
+        "accept confirm missing",
+        "leftover accept dialog",
+    )
+    return any(n in text for n in needles)
+
+
 def should_wait_for_network_recovery(exc_or_text) -> bool:
     """True only for connectivity / DNS / TLS drops — never search-page navigation failure."""
-    text = str(exc_or_text or "")
-    if "could not navigate to search page" in text.lower():
+    if is_inbox_or_search_nav_failure(exc_or_text):
         return False
-    return is_transient_network_error(text)
+    return is_transient_network_error(exc_or_text)
 
 
 def action_result_is_complete(action: str) -> bool:
@@ -171,12 +201,19 @@ def action_result_is_complete(action: str) -> bool:
 
 
 NUM_ITERATIONS = resolve_num_iterations()
+_SEARCH_NAV_CHROME_RECOVERED = False
 RECIPIENT_IDS = [x.strip() for x in os.getenv("RECIPIENT_COMPANY_IDS", "9994,293798").split(",") if x.strip()]
 DEFAULT_CONTACT_NAME = "Qu, Theresa"
 IMDS_USERNAME = os.getenv("IMDS_USERNAME", "")
 IMDS_PASSWORD = os.getenv("IMDS_PASSWORD", "")
 OTP_SECRET = os.getenv("OTP_SECRET", "")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+def reset_search_nav_chrome_recovery():
+    """Allow one heavy chrome recovery per live run (not per remaining MDS ID)."""
+    global _SEARCH_NAV_CHROME_RECOVERED
+    _SEARCH_NAV_CHROME_RECOVERED = False
 
 
 def load_live_credentials():
@@ -269,10 +306,81 @@ XP_FIRST_ROW = "//*[@id='pt1:dcCmds:sfIbLU:pc2:tResult::db']/table/tbody/tr"
 XP_FIRST_RESULT_NAME = "//*[@id='pt1:dcCmds:sfIbLU:pc2:tResult:0:cName']"
 XP_MDS_MENU = "//*[@id='pt1:pt_mFile']/div/table/tbody/tr/td[2]/a"
 XP_ACCEPT = "//*[@id='pt1:pt_cmiMenuAccept']/td[2]"
+XP_ACCEPT_MENU = [
+    XP_ACCEPT,
+    "//*[@id='pt1:pt_cmiMenuAccept']/td[1]",
+    "//*[@id='pt1:pt_cmiMenuAccept']",
+]
 XP_ACCEPT_MODAL = "//*[@id='dcPopup:ctbAcceptMds']/a/span"
+# Confirm lives in dcPopup or pt1:pt_dcud — not a page-wide Accept td.
+# Draft MDS 0.01 may mint dcPopup / pt_dcud:ctbAcceptMds / ctbAccept variants.
+XP_ACCEPT_CONFIRM = [
+    XP_ACCEPT_MODAL,
+    "//*[@id='dcPopup:ctbAcceptMds']/a",
+    "//*[@id='dcPopup:ctbAcceptMds']",
+    "//*[@id='pt1:pt_dcud:ctbAcceptMds']/a/span",
+    "//*[@id='pt1:pt_dcud:ctbAcceptMds']/a",
+    "//*[@id='pt1:pt_dcud:ctbAcceptMds']",
+    "//*[@id='pt1:pt_dcud:ctbAccept']/a/span",
+    "//*[@id='pt1:pt_dcud:ctbAccept']/a",
+    "//*[@id='pt1:pt_dcud:ctbAccept']",
+    "//*[@id='dcPopup:ctbAccept']/a/span",
+    "//*[@id='dcPopup:ctbAccept']/a",
+    "//*[@id='dcPopup:ctbAccept']",
+]
+# Successful Accept finds confirm then waits ~10s after click; 2s is too short.
+ACCEPT_CONFIRM_WAIT_MS = 12000
+ACCEPT_CONFIRM_POLL_MS = 400
+XP_ACCEPT_CANCEL = [
+    "//*[@id='dcPopup:ctbCancel']/a/span",
+    "//*[@id='dcPopup:ctbCancel']/a",
+    "//*[@id='dcPopup:ctbCancel']",
+    "//*[@id='pt1:pt_dcud:ctbCancel']/a/span",
+    "//*[@id='pt1:pt_dcud:ctbCancel']/a",
+    "//*[@id='pt1:pt_dcud:ctbCancel']",
+]
+CSS_ACCEPT_CONFIRM = (
+    "#dcPopup\\:ctbAcceptMds",
+    "#dcPopup\\:ctbAcceptMds > a > span",
+    "#dcPopup\\:ctbAcceptMds > a",
+    "[id='dcPopup:ctbAcceptMds']",
+    "#pt1\\:pt_dcud\\:ctbAcceptMds",
+    "#pt1\\:pt_dcud\\:ctbAcceptMds > a > span",
+    "#pt1\\:pt_dcud\\:ctbAccept",
+    "#pt1\\:pt_dcud\\:ctbAccept > a > span",
+    "#pt1\\:pt_dcud\\:ctbAccept > a",
+    "#dcPopup a:has-text('Accept')",
+    "#dcPopup span:has-text('Accept')",
+    ".AFModalDialog #dcPopup\\:ctbAcceptMds",
+    ".AFModalDialog a:has-text('Accept MDS')",
+    "#pt1\\:pt_dcud a:has-text('Accept')",
+    "#pt1\\:pt_dcud input[value='Accept']",
+    "#pt1\\:pt_dcud button:has-text('Accept')",
+    "#pt1\\:pt_dcud\\:ctbOk",
+    "#pt1\\:pt_dcud\\:ctbOk > a",
+)
+CSS_ACCEPT_CANCEL = (
+    "#dcPopup\\:ctbCancel",
+    "#dcPopup\\:ctbCancel > a > span",
+    "#dcPopup\\:ctbCancel > a",
+    "[id='dcPopup:ctbCancel']",
+    "#pt1\\:pt_dcud\\:ctbCancel",
+    "#pt1\\:pt_dcud\\:ctbCancel > a > span",
+    "#pt1\\:pt_dcud\\:ctbCancel > a",
+    ".AFModalDialog button:has-text('Cancel'):visible",
+    "button:has-text('Cancel'):visible",
+    "a:has-text('Cancel'):visible",
+    "span:has-text('Cancel'):visible",
+    "input[value='Cancel']:visible",
+)
 XP_FORWARD_MENU = "//*[@id='pt1:pt_mMenuForward']"
 XP_FORWARD_ACTION1 = "//*[@id='pt1:pt_cmiMenuForward']/td[1]"
 XP_FORWARD_ACTION2 = "//*[@id='pt1:pt_cmiMenuForward']/td[2]"
+XP_FORWARD_ACTION = [
+    XP_FORWARD_ACTION2,
+    XP_FORWARD_ACTION1,
+    "//*[@id='pt1:pt_cmiMenuForward']",
+]
 # Same IDs as above; ADF often puts the clickable text in td[1]/td[2] (Accept already uses /td[2]).
 XP_FORWARD_MENU_CLICK = [
     "//*[@id='pt1:pt_mMenuForward']/td[2]",
@@ -638,8 +746,49 @@ def preferred_check_result_message(text: str) -> str | None:
 def parse_mds_id_number(visible: str | None) -> str:
     if not visible or visible == "EXTRACTION_FAILED":
         return ""
+    if looks_like_inbox_table_chrome(visible):
+        return ""
     match = re.search(r"(\d{7,})", str(visible))
     return match.group(1) if match else ""
+
+
+def looks_like_inbox_table_chrome(text: str | None) -> bool:
+    """True for Received MDSs list chrome, not an Ingredients ID / Version value."""
+    t = " ".join(str(text or "").lower().split())
+    if not t:
+        return False
+    return (
+        "hidden column" in t
+        or "there are hidden column" in t
+        or 'using "view" button' in t
+        or "using “view” button" in t
+        or "using 'view' button" in t
+        or ("menu export" in t and "hidden" in t)
+    )
+
+
+def looks_like_mds_id_value(text: str | None) -> bool:
+    """True when text is a numeric MDS ID / Version, not inbox Export chrome."""
+    if not text:
+        return False
+    s = str(text).strip()
+    if s == "EXTRACTION_FAILED" or looks_like_inbox_table_chrome(s):
+        return False
+    if re.fullmatch(r"\d{7,}(?:\s*/\s*[\d.]+)?", s):
+        return True
+    return bool(re.search(r"\d{7,}\s*/\s*[\d.]+", s))
+
+
+def own_mds_ready_for_recipients(received_id: str | None, on_screen_id: str | None) -> bool:
+    """True only when Forward minted a different numeric ID than the received MDS."""
+    rec = parse_mds_id_number(received_id)
+    own = parse_mds_id_number(on_screen_id)
+    return bool(own and rec and own != rec)
+
+
+def is_searchable_mds_id(visible: str | None) -> bool:
+    """True when accept/reject can search this ID (numeric, not EXTRACTION_FAILED)."""
+    return bool(parse_mds_id_number(visible))
 
 
 def mds_open_status(visible: str | None, expected: str | None) -> str:
@@ -922,12 +1071,35 @@ def wait_for_connectivity(page, timeout_s: int | None = None) -> bool:
 
 
 def ensure_imds_session(page) -> bool:
-    """After a drop, wait for the network, re-login if IMDS expired, return to search."""
+    """After a drop, wait for the network, re-login if IMDS expired, return to search.
+
+    Inbox-missing / search-nav failure is not a network drop: recover via
+    Received MDSs + re-filter. Do not wait 15 minutes or burn a second OTP.
+    """
     try:
         if logged_in_to_imds(page) and not page_looks_offline(page):
             return True
     except Exception:
         pass
+    live_imds = False
+    try:
+        live_imds = not page_looks_offline(page) and not on_public_login_page(page)
+    except Exception:
+        live_imds = False
+    if live_imds:
+        log.info(
+            "IMDS is still reachable; recovering the inbox list without a "
+            "15-min network wait or re-login."
+        )
+        wait_for_imds_chrome(page)
+        if recover_inbox_list(page):
+            return True
+        try:
+            if logged_in_to_imds(page):
+                return True
+        except Exception:
+            pass
+        return False
     if not wait_for_connectivity(page):
         return False
     wait_for_imds_chrome(page)
@@ -939,6 +1111,7 @@ def ensure_imds_session(page) -> bool:
     wait_for_imds_chrome(page)
     if session_logged_in_after_reconnect(page, login_succeeded):
         navigate_to_search_page(page)
+        apply_not_yet_browsed_filter_and_search(page)
         return True
     log.warning("Still not logged in after reconnect.")
     return False
@@ -955,6 +1128,9 @@ def visible_dialog_text(page) -> str:
         ".AFModalDialog",
         "[id*='pt_dcud']",
         "#pt1\\:pt_dcud",
+        "#dcPopup",
+        "[id='dcPopup']",
+        "[id*='dcPopup']",
         ".p_AFModal",
         ".AFBlockingGlassPane",
     ):
@@ -1049,6 +1225,11 @@ def modal_dialog_visible(page) -> bool:
         "#pt1\\:pt_dcud\\:ctbNo",
         "#pt1\\:pt_dcud\\:ctbOk",
         "#pt1\\:pt_dcud\\:ctbCancel",
+        "#dcPopup",
+        "[id='dcPopup']",
+        "#dcPopup\\:ctbAcceptMds",
+        "[id='dcPopup:ctbAcceptMds']",
+        "#dcPopup\\:ctbCancel",
     ):
         if _locator_visible(page, sel):
             return True
@@ -1352,16 +1533,18 @@ def read_visible_mds_id(page) -> str | None:
             except Exception:
                 own = ""
             found = id_ver.search(own)
-            if found:
+            if found and looks_like_mds_id_value(found.group(1)):
                 return found.group(1)
             try:
                 nxt = cell.locator("xpath=following-sibling::td")
                 if nxt.count():
                     val = (nxt.first.text_content() or "").strip()
+                    if looks_like_inbox_table_chrome(val):
+                        continue
                     found = id_ver.search(val)
-                    if found:
+                    if found and looks_like_mds_id_value(found.group(1)):
                         return found.group(1)
-                    if parse_mds_id_number(val):
+                    if looks_like_mds_id_value(val):
                         return val
             except Exception:
                 continue
@@ -1373,7 +1556,7 @@ def read_visible_mds_id(page) -> str | None:
             return None
         body = page.locator("body").text_content(timeout=1500) or ""
         found = id_ver.search(body)
-        if found:
+        if found and looks_like_mds_id_value(found.group(1)):
             return found.group(1)
     except Exception:
         pass
@@ -1386,6 +1569,7 @@ def ingredients_tree_ready(page) -> bool:
         f"xpath={XP_INGREDIENTS_EXPAND}",
         f"xpath={XP_INGREDIENTS_EXPAND}/table",
         "label:has-text('MDS Supplier')",
+        "[role='treeitem']",
     ):
         try:
             if page.locator(sel).count() > 0:
@@ -1393,6 +1577,58 @@ def ingredients_tree_ready(page) -> bool:
         except Exception:
             continue
     return False
+
+
+def mds_menu_available(page) -> bool:
+    """True when the MDS menu that hosts Check/Accept/Reject is in the DOM."""
+    for sel in (
+        f"xpath={XP_MDS_MENU}",
+        "#pt1\\:pt_mFile",
+        "xpath=//*[@id='pt1:pt_mFile']",
+        "a:has-text('MDS'):visible",
+    ):
+        try:
+            if page.locator(sel).count() > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def ensure_ingredients_ready_for_check(page, attempts: int = 4) -> bool:
+    """Wait for Ingredients/tree/MDS menu before declaring no materials or Check-failed.
+
+    Row 5 on 19 Sep opened on the wrong/unready view: Expand All then immediately
+    'No material nodes found' / MDS menu missing. Click Ingredients and retry.
+    A material MDS with no child nodes must still run MDS menu + Check.
+    """
+    for attempt in range(1, attempts + 1):
+        tree = ingredients_tree_ready(page)
+        menu = mds_menu_available(page)
+        if tree and menu:
+            return True
+        log.info(
+            f"Ingredients/tree not ready yet (attempt {attempt}/{attempts}); "
+            "clicking Ingredients tab before Check."
+        )
+        click_ingredients_tab(page)
+        try:
+            page.wait_for_timeout(800)
+        except Exception:
+            pass
+        if not tree:
+            try:
+                expand_tree(page)
+            except Exception:
+                pass
+        try:
+            dismiss_modal(page, allow_escape=False, save_changes="no")
+        except Exception:
+            pass
+        if ingredients_tree_ready(page) or mds_menu_available(page):
+            return True
+    log.warning("Ingredients/tree still not ready after retries; Check will still run.")
+    return ingredients_tree_ready(page) or mds_menu_available(page)
 
 
 def dismiss_modal(page, allow_escape: bool = True, save_changes: str = "yes"):
@@ -1469,6 +1705,8 @@ def dismiss_modal(page, allow_escape: bool = True, save_changes: str = "yes"):
         log.warning("Leaving Check-results dialog in place; JS strip would freeze the leftover own MDS.")
         return False
 
+    # One OK for ordinary IMDS notices (shared #pt1:pt_dcud:ctbOk). Do not click
+    # the same OK twice via the child span. GADSDL/SVHC already checkbox-then-OK.
     for selector in [
         "#pt1\\:pt_dcud\\:ctbOk",
         "#pt1\\:pt_dcud\\:ctbOk > a > span",
@@ -1488,6 +1726,17 @@ def dismiss_modal(page, allow_escape: bool = True, save_changes: str = "yes"):
                     close_company_lookup_dialogs(page)
                 if not modal_dialog_visible(page) and lookup_company_iframe_count(page) == 0:
                     return True
+                dialog_text = visible_dialog_text(page)
+                if (
+                    is_gadsdl_svhc_update_prompt(dialog_text)
+                    or is_save_changes_prompt(dialog_text)
+                    or is_forward_previous_version_prompt(dialog_text)
+                    or is_check_errors_blocking_prompt(dialog_text)
+                    or yes_no_buttons_visible(page)
+                ):
+                    break
+                log.info("Ordinary dialog already received one OK; not clicking OK again.")
+                return True
         except Exception:
             continue
 
@@ -1565,45 +1814,53 @@ def _search_id_field_ready(page) -> bool:
 
 
 def _click_received_mds_link(page) -> bool:
-    received_mds_link = page.locator("a:has-text('Received MDSs'):visible").first
-    if received_mds_link.count() == 0 or not received_mds_link.is_visible():
-        return False
-    received_mds_link.click()
-    log.info("Clicked 'Received MDSs' link.")
-    page.wait_for_timeout(800)
-    dismiss_modal(page, allow_escape=False, save_changes="no")
-    wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False, save_changes="no")
-    page.wait_for_load_state("networkidle", timeout=15000)
-    page.wait_for_timeout(1500)
-    if _search_id_field_ready(page):
-        log.info("Successfully navigated to search page via Received MDSs link.")
-        return True
-    if modal_dialog_visible(page):
-        dismiss_modal(page, allow_escape=False, save_changes="no")
+    try:
         received_mds_link = page.locator("a:has-text('Received MDSs'):visible").first
-        if received_mds_link.count() > 0:
-            received_mds_link.click()
-            page.wait_for_timeout(2000)
-            if _search_id_field_ready(page):
-                log.info("Successfully navigated to search page after dismissing save-changes.")
-                return True
-    return _search_id_field_ready(page)
+        if received_mds_link.count() == 0 or not received_mds_link.is_visible():
+            return False
+        received_mds_link.click(timeout=8000)
+        log.info("Clicked 'Received MDSs' link.")
+        page.wait_for_timeout(800)
+        dismiss_modal(page, allow_escape=False, save_changes="no")
+        wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False, save_changes="no")
+        wait_networkidle(page, 5000)
+        page.wait_for_timeout(800)
+        if _search_id_field_ready(page):
+            log.info("Successfully navigated to search page via Received MDSs link.")
+            return True
+        if modal_dialog_visible(page):
+            dismiss_modal(page, allow_escape=False, save_changes="no")
+            received_mds_link = page.locator("a:has-text('Received MDSs'):visible").first
+            if received_mds_link.count() > 0:
+                received_mds_link.click(timeout=8000)
+                page.wait_for_timeout(1500)
+                if _search_id_field_ready(page):
+                    log.info("Successfully navigated to search page after dismissing save-changes.")
+                    return True
+        return _search_id_field_ready(page)
+    except Exception as e:
+        log.warning(f"Received MDSs link failed: {e}")
+        return False
 
 
 def _click_received_mds_menu(page) -> bool:
-    back_btn = page.locator(f"xpath={XP_RECEIVED_MDS_MENU}")
-    if back_btn.count() == 0 or not back_btn.is_visible():
+    try:
+        back_btn = page.locator(f"xpath={XP_RECEIVED_MDS_MENU}")
+        if back_btn.count() == 0 or not back_btn.is_visible():
+            return False
+        back_btn.click(force=True, timeout=8000)
+        log.info("Clicked MDS Request tab (back).")
+        dismiss_modal(page, allow_escape=False, save_changes="no")
+        wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False, save_changes="no")
+        wait_networkidle(page, 5000)
+        page.wait_for_timeout(1200)
+        if _search_id_field_ready(page):
+            log.info("Successfully navigated to search page via back button.")
+            return True
         return False
-    back_btn.click(force=True)
-    log.info("Clicked MDS Request tab (back).")
-    dismiss_modal(page, allow_escape=False, save_changes="no")
-    wait_for_glass_pane_clear(page, timeout_ms=5000, allow_escape=False, save_changes="no")
-    page.wait_for_load_state("networkidle", timeout=15000)
-    page.wait_for_timeout(2000)
-    if _search_id_field_ready(page):
-        log.info("Successfully navigated to search page via back button.")
-        return True
-    return False
+    except Exception as e:
+        log.warning(f"MDS Request back failed: {e}")
+        return False
 
 
 def _click_inbox_mds(page) -> bool:
@@ -1625,8 +1882,8 @@ def _click_inbox_mds(page) -> bool:
             mds_item = dropdown.locator("a:has-text('MDS'):visible, li:has-text('MDS'):visible").first
     if mds_item.count() > 0 and mds_item.is_visible():
         mds_item.click()
-        page.wait_for_load_state("networkidle", timeout=15000)
-        page.wait_for_timeout(2000)
+        wait_networkidle(page, 8000)
+        page.wait_for_timeout(1500)
         log.info("Clicked 'MDS' from Inbox dropdown")
     else:
         log.warning("MDS item not found; waiting before retrying search navigation.")
@@ -1641,93 +1898,154 @@ def _click_inbox_mds(page) -> bool:
         return False
 
 
-def navigate_to_search_page(page):
-    log.info("Navigating to Received MDSs search page...")
-    close_check_results_dialog(page)
-    close_company_lookup_dialogs(page)
-    wait_for_imds_chrome(page)
-    # After a confirmed login, leftover Login DOM must not force a second OTP.
-    if on_public_login_page(page) and not logged_in_to_imds(page):
-        log.warning("Session is on the public login page; logging in again.")
-        imds_login(page)
-        wait_for_imds_chrome(page)
+def _dismiss_nav_blockers(page) -> None:
+    """Dismiss leftover Accept / save-changes BEFORE waiting for Inbox chrome."""
+    try:
+        close_check_results_dialog(page)
+    except Exception:
+        pass
+    try:
+        close_company_lookup_dialogs(page)
+    except Exception:
+        pass
     for _ in range(4):
-        dismiss_modal(page, allow_escape=False, save_changes="no")
-        page.wait_for_timeout(400)
+        try:
+            dismiss_modal(page, allow_escape=False, save_changes="no")
+        except Exception:
+            pass
+        try:
+            page.wait_for_timeout(400)
+        except Exception:
+            pass
         if not modal_dialog_visible(page):
             break
 
-    for attempt in range(1, 5):
-        try:
-            if _click_received_mds_link(page):
-                return True
-        except Exception as e:
-            log.warning(f"Error clicking Received MDSs link: {e}")
-        try:
-            if _click_received_mds_menu(page):
-                return True
-        except Exception as e:
-            log.warning(f"Error using back button: {e}")
-        try:
-            if _click_inbox_mds(page):
-                return True
-        except Exception as e:
-            log.warning(f"Error navigating to search page via Inbox: {e}")
-        log.info(f"Search page not ready yet (attempt {attempt}/4); waiting for IMDS chrome...")
-        wait_for_imds_chrome(page, timeout_ms=8000)
-        try:
-            page.wait_for_timeout(1000)
-        except Exception:
-            time.sleep(0.5)
 
-    log.info("All navigation methods failed; reloading main page and retrying...")
+def _try_search_nav_fast(page) -> bool:
+    """Received MDSs, MDS Request back, then Inbox — one pass, no 4× chrome wait."""
     try:
-        if on_public_login_page(page) and not logged_in_to_imds(page):
-            imds_login(page)
-            wait_for_imds_chrome(page)
-        else:
-            page.goto("https://www.mdsystem.com/imdsnt")
-            page.wait_for_load_state("networkidle", timeout=30000)
-            page.wait_for_timeout(3000)
-            wait_for_imds_chrome(page)
-            if on_public_login_page(page) and not logged_in_to_imds(page):
-                imds_login(page)
-                wait_for_imds_chrome(page)
+        if _click_received_mds_link(page):
+            return True
+    except Exception as e:
+        log.warning(f"Error clicking Received MDSs link: {e}")
+    try:
+        if _click_received_mds_menu(page):
+            return True
+    except Exception as e:
+        log.warning(f"Error using back button: {e}")
+    inbox_ok = False
+    try:
+        inbox_ok = _click_inbox_mds(page)
+        if inbox_ok:
+            return True
+    except Exception as e:
+        log.warning(f"Error navigating to search page via Inbox: {e}")
+    if not inbox_ok:
+        log.info("Inbox missing; retrying Received MDSs link after chrome wait.")
         try:
             if _click_received_mds_link(page) or _click_received_mds_menu(page):
                 return True
         except Exception as e:
-            log.warning(f"Error clicking Received MDSs after reload: {e}")
-        inbox_btn = page.locator("#pt1\\:pt_ctbToolBarInbound\\:\\:popEl")
-        if inbox_btn.count() == 0:
-            inbox_btn = page.locator("//*[@id='pt1:pt_ctbToolBarInbound::popEl']")
-        if inbox_btn.count() > 0 and inbox_btn.is_visible():
-            inbox_btn.click()
-            page.wait_for_timeout(1500)
-            mds_item = page.locator("#pt1\\:pt_cmiSearchInboxB")
-            if mds_item.count() == 0:
-                dropdown = page.locator("#pt1\\:pt_ctbToolBarInbound_Menu\\:\\:menu")
-                if dropdown.count() > 0:
-                    mds_item = dropdown.locator("a:has-text('MDS'):visible, li:has-text('MDS'):visible").first
-            if mds_item.count() > 0 and mds_item.is_visible():
-                mds_item.click()
-                page.wait_for_load_state("networkidle", timeout=15000)
-                page.wait_for_timeout(2000)
-                if _search_id_field_ready(page):
-                    log.info("Successfully navigated to search page after reload.")
-                    return True
-    except Exception as e:
-        log.warning(f"Reload fallback failed: {e}")
+            log.warning(f"Error retrying Received MDSs after Inbox-missing: {e}")
+    return _search_id_field_ready(page)
 
-    log.error("Failed to navigate to search page after all attempts.")
+
+def recover_imds_chrome_once(page) -> bool:
+    """After one chrome-loss, dismiss leftover dialog then Received MDSs / MDS Request.
+
+    Do not re-login on leftover Login DOM. Do not treat this as a 15-min network wait.
+    """
+    log.info("Recovering IMDS chrome once after search-nav / chrome loss...")
+    _dismiss_nav_blockers(page)
+    if _try_search_nav_fast(page):
+        return True
+    wait_for_imds_chrome(page, timeout_ms=8000)
+    if _try_search_nav_fast(page):
+        return True
+    if page_looks_offline(page):
+        log.warning("Page looks offline during chrome recovery; not treating search-nav as a 15-min wait.")
+        return False
+    if on_public_login_page(page) and not logged_in_to_imds(page):
+        log.warning(
+            "Leftover Login DOM during chrome recovery; not burning a second OTP."
+        )
+    else:
+        try:
+            log.info("Reloading IMDS main page once to restore chrome.")
+            page.goto(IMDS_HOME_URL)
+            wait_networkidle(page, 8000)
+            page.wait_for_timeout(1500)
+            wait_for_imds_chrome(page, timeout_ms=8000)
+        except Exception as e:
+            log.warning(f"Main-page reload during chrome recovery failed: {e}")
+    _dismiss_nav_blockers(page)
+    return _try_search_nav_fast(page)
+
+
+def leave_own_mds_for_inbox(page) -> bool:
+    """After Propose, discard leftover own MDS (save-changes No) then Received MDSs.
+
+    Do not sit 20s waiting for Inbox while a save-changes dialog is up.
+    """
+    log.info("Leaving own MDS with save-changes No, then Received MDSs.")
+    try:
+        close_check_results_dialog(page, any_check_overlay=True)
+    except Exception:
+        pass
+    dismiss_modal(page, allow_escape=False, save_changes="no")
+    wait_for_glass_pane_clear(page, timeout_ms=4000, allow_escape=False, save_changes="no")
+    if _search_id_field_ready(page):
+        return True
+    try:
+        if _click_received_mds_link(page):
+            return True
+    except Exception as e:
+        log.warning(f"Received MDSs after leave-own-MDS failed: {e}")
+    try:
+        if _click_received_mds_menu(page):
+            return True
+    except Exception as e:
+        log.warning(f"MDS Request back after leave-own-MDS failed: {e}")
+    return navigate_to_search_page(page)
+
+
+def navigate_to_search_page(page):
+    log.info("Navigating to Received MDSs search page...")
+    global _SEARCH_NAV_CHROME_RECOVERED
+    # Dismiss leftover Accept / save-changes BEFORE the long Inbox chrome wait.
+    _dismiss_nav_blockers(page)
+    # After a confirmed login, leftover Login DOM must not force a second OTP.
+    if page_looks_offline(page):
+        log.warning("Search-nav sees an offline page; not treating this as a 15-min network wait.")
+    elif on_public_login_page(page) and not logged_in_to_imds(page):
+        log.warning(
+            "Leftover Login DOM during search-nav; not burning a second OTP."
+        )
+    if _search_id_field_ready(page):
+        return True
+    if _try_search_nav_fast(page):
+        return True
+    if not _SEARCH_NAV_CHROME_RECOVERED:
+        _SEARCH_NAV_CHROME_RECOVERED = True
+        if recover_imds_chrome_once(page):
+            return True
+    else:
+        log.warning(
+            "Chrome already recovered once; not looping Inbox 4× for this ID."
+        )
+        _dismiss_nav_blockers(page)
+        if _try_search_nav_fast(page):
+            return True
+    log.error("Failed to navigate to search page after chrome recovery.")
     return False
 
 # ---------- Navigate and Filter ----------
-def navigate_and_filter(page):
-    log.info("Navigating to Received MDSs and applying filter...")
-    if not navigate_to_search_page(page):
-        raise RuntimeError("Could not navigate to search page")
+def apply_not_yet_browsed_filter_and_search(page) -> bool:
+    """Re-apply the inbox 'not yet browsed' filter and Search.
 
+    After a reconnect or a lost results table the ID field may be back but
+    tResult:N:cName is empty until this filter + Search run again.
+    """
     log.info("Applying filter...")
     page.evaluate("""
         () => {
@@ -1842,6 +2160,14 @@ def navigate_and_filter(page):
         log.warning("Table not found.")
     page.wait_for_timeout(2000)
     save_screenshot(page, "06_final_list.png")
+    return True
+
+
+def navigate_and_filter(page):
+    log.info("Navigating to Received MDSs and applying filter...")
+    if not navigate_to_search_page(page):
+        raise RuntimeError("Could not navigate to search page")
+    apply_not_yet_browsed_filter_and_search(page)
 
 # ---------- Expand Tree ----------
 def expand_tree(page):
@@ -1914,22 +2240,74 @@ def expand_tree(page):
             break
     log.info(f"Expanded {total_expanded} nodes in total.")
 
+def still_on_inbox_result_list(page) -> bool:
+    """True when the Received MDSs tResult table is still the main view."""
+    body = ""
+    try:
+        body = page.locator("body").text_content(timeout=1500) or ""
+    except Exception:
+        try:
+            body = page.locator("body").inner_text(timeout=1500) or ""
+        except Exception:
+            body = ""
+    chrome = looks_like_inbox_table_chrome(body)
+    tree = False
+    try:
+        tree = ingredients_tree_ready(page)
+    except Exception:
+        tree = False
+    vis = None
+    try:
+        vis = read_visible_mds_id(page)
+    except Exception:
+        vis = None
+    if looks_like_mds_id_value(vis) and tree:
+        return False
+    tresult = False
+    try:
+        tresult = page.locator(f"xpath={XP_FIRST_RESULT_NAME}").count() > 0
+        if not tresult:
+            tresult = page.locator(
+                "xpath=//*[contains(@id,'tResult:') and contains(@id,':cName')]"
+            ).count() > 0
+    except Exception:
+        tresult = False
+    if chrome and not tree:
+        return True
+    if tresult and not tree and not looks_like_mds_id_value(vis):
+        return True
+    if chrome and tresult and not looks_like_mds_id_value(vis):
+        return True
+    return False
+
+
 # ---------- Extract MDS ID ----------
 def extract_mds_id_version_early(page):
     try:
+        if still_on_inbox_result_list(page):
+            log.warning(
+                "Still on the inbox result list; not parsing Export/hidden-column chrome as MDS ID."
+            )
+            return "EXTRACTION_FAILED"
         page.wait_for_selector("td:has-text('ID / Version')", timeout=10000)
         cells = page.locator("td").all()
         for cell in cells:
-            text = cell.text_content().strip()
+            text = (cell.text_content() or "").strip()
             if "ID / Version" in text:
                 next_cell = cell.locator("xpath=following-sibling::td")
                 if next_cell.count():
-                    val = next_cell.text_content().strip()
-                    if val:
+                    val = (next_cell.text_content() or "").strip()
+                    if looks_like_mds_id_value(val):
                         return val
-        body = page.locator("body").text_content()
+                    if val and looks_like_inbox_table_chrome(val):
+                        log.warning("ID / Version neighbor is inbox table chrome; ignoring.")
+                        continue
+        body = page.locator("body").text_content() or ""
+        if looks_like_inbox_table_chrome(body) and not ingredients_tree_ready(page):
+            log.warning("Body text is inbox chrome; not using it as MDS ID.")
+            return "EXTRACTION_FAILED"
         match = re.search(r'(\d{10,}\s*/\s*[\d.]+)', body)
-        if match:
+        if match and looks_like_mds_id_value(match.group(1)):
             return match.group(1)
     except Exception as e:
         log.warning(f"ID extraction failed: {e}")
@@ -1937,18 +2315,42 @@ def extract_mds_id_version_early(page):
     return "EXTRACTION_FAILED"
 
 # ---------- Capture Material Nodes ----------
+def collect_material_nodes(page, retries: int = 3):
+    """Find material tree nodes. Retry Ingredients + Expand All before giving up."""
+    material_nodes = []
+    for attempt in range(1, retries + 1):
+        material_nodes = page.locator("[role='treeitem']:has(img[src*='material'])").all()
+        if not material_nodes:
+            material_images = page.locator("img[src*='btn_tree_material']").all()
+            material_nodes = []
+            for img in material_images:
+                parent = img.locator("xpath=ancestor::*[@role='treeitem']")
+                if parent.count():
+                    material_nodes.append(parent)
+        if material_nodes:
+            return material_nodes
+        if attempt < retries:
+            log.info(
+                f"Material nodes not visible yet (attempt {attempt}/{retries}); "
+                "clicking Ingredients and retrying Expand All."
+            )
+            ensure_ingredients_ready_for_check(page, attempts=2)
+            try:
+                expand_tree(page)
+            except Exception:
+                pass
+            try:
+                page.wait_for_timeout(800)
+            except Exception:
+                pass
+    log.warning("No material nodes found.")
+    return []
+
+
 def capture_all_material_nodes(page, iteration):
     log.info("Capturing screenshots of all material nodes...")
-    material_nodes = page.locator("[role='treeitem']:has(img[src*='material'])").all()
+    material_nodes = collect_material_nodes(page)
     if not material_nodes:
-        material_images = page.locator("img[src*='btn_tree_material']").all()
-        material_nodes = []
-        for img in material_images:
-            parent = img.locator("xpath=ancestor::*[@role='treeitem']")
-            if parent.count():
-                material_nodes.append(parent)
-    if not material_nodes:
-        log.warning("No material nodes found.")
         return
     log.info(f"Found {len(material_nodes)} material nodes.")
     previous_name = ""
@@ -2092,21 +2494,13 @@ def run_checks_on_mds(page, iteration, mds_id):
         '5.5.1', '5.5.2', '6.1', '9.7', '7.1'
     ]
 
-    material_nodes = page.locator("[role='treeitem']:has(img[src*='material'])").all()
-    if not material_nodes:
-        material_images = page.locator("img[src*='btn_tree_material']").all()
-        material_nodes = []
-        for img in material_images:
-            parent = img.locator("xpath=ancestor::*[@role='treeitem']")
-            if parent.count():
-                material_nodes.append(parent)
+    material_nodes = collect_material_nodes(page)
 
     comp_material_map = {}
     recyclate_fail = False
     biocidal_fail = False
 
     if not material_nodes:
-        log.warning("No material nodes found.")
         return {
             "parts_marking_check": "No materials",
             "recyclate_check": "No materials",
@@ -2177,6 +2571,9 @@ def run_checks_on_mds(page, iteration, mds_id):
 def click_first_tree_node(page):
     log.info("Clicking the first tree node...")
     first_node = page.locator("[role='treeitem']:visible, .af_tree_node_text:visible").first
+    if first_node.count() == 0:
+        ensure_ingredients_ready_for_check(page, attempts=2)
+        first_node = page.locator("[role='treeitem']:visible, .af_tree_node_text:visible").first
     if first_node.count() > 0:
         try:
             first_node.scroll_into_view_if_needed()
@@ -2259,6 +2656,8 @@ def read_check_results_text(page) -> str:
 def run_check(page):
     log.info("Performing check...")
     try:
+        if not mds_menu_available(page) or not ingredients_tree_ready(page):
+            ensure_ingredients_ready_for_check(page)
         mds_menu = page.locator(f"xpath={XP_MDS_MENU}")
         if mds_menu.count() > 0 and mds_menu.is_visible():
             mds_menu.click(force=True)
@@ -2272,8 +2671,18 @@ def run_check(page):
                 log.info("Clicked MDS menu (fallback).")
                 page.wait_for_timeout(1000)
             else:
-                log.warning("MDS menu not found.")
-                return False
+                log.info("MDS menu still missing; clicking Ingredients and retrying Check.")
+                ensure_ingredients_ready_for_check(page, attempts=2)
+                mds_menu = page.locator(f"xpath={XP_MDS_MENU}")
+                if mds_menu.count() == 0 or not mds_menu.is_visible():
+                    mds_menu = page.locator("a:has-text('MDS'):visible, #pt1\\:pt_mFile .x18v:visible").first
+                if mds_menu.count() > 0:
+                    mds_menu.click(force=True)
+                    log.info("Clicked MDS menu after Ingredients retry.")
+                    page.wait_for_timeout(1000)
+                else:
+                    log.warning("MDS menu not found.")
+                    return False
 
         check_item = page.locator("a:has-text('Check'):visible, #pt1\\:pt_cmiMenuCheck:visible").first
         check_item.wait_for(state="visible", timeout=10000)
@@ -2378,134 +2787,257 @@ def handle_forward_confirmation_modal(page):
         log.warning(f"Error handling forward confirmation modal: {e}")
     return None
 
-# ---------- Accept MDS ----------
-def accept_mds(page):
-    log.info("Accepting MDS (PASS workflow) using exact XPaths...")
+def _click_xpath_if_present(page, xpath, *, hover_first: bool = False) -> bool:
+    """Click an ADF node if it exists. Do not require is_visible() — submenu wrappers often fail that check."""
+    try:
+        loc = page.locator(f"xpath={xpath}")
+        if loc.count() == 0:
+            return False
+        target = loc.first
+        if hover_first:
+            try:
+                target.hover(force=True, timeout=3000)
+                page.wait_for_timeout(400)
+            except Exception:
+                pass
+        target.click(force=True, timeout=5000)
+        return True
+    except Exception:
+        return False
+
+
+def _dialog_or_glass_up(page) -> bool:
+    """True when a modal, leftover dcPopup Accept dialog, or glass pane would steal clicks."""
+    try:
+        if modal_dialog_visible(page):
+            return True
+    except Exception:
+        pass
+    for sel in (
+        "#dcPopup\\:ctbAcceptMds",
+        "[id='dcPopup:ctbAcceptMds']",
+        "#dcPopup\\:ctbCancel",
+        "#dcPopup",
+        ".AFModalGlassPane",
+        ".AFBlockingGlassPane",
+        ".AFModalDialog",
+    ):
+        if _locator_visible(page, sel):
+            return True
+    return False
+
+
+def _open_mds_file_menu(page) -> bool:
+    if _dialog_or_glass_up(page):
+        log.warning("Not opening MDS menu while a dialog/glass pane is up.")
+        return False
     try:
         mds_menu = page.locator(f"xpath={XP_MDS_MENU}")
         if mds_menu.count() > 0 and mds_menu.is_visible():
             mds_menu.click(force=True)
             log.info("Clicked MDS menu (exact XPath).")
             page.wait_for_timeout(2000)
-        else:
-            log.warning("MDS menu not found via exact XPath; trying fallback.")
-            mds_menu = page.locator("a:has-text('MDS'):visible, #pt1\\:pt_mFile .x18v:visible").first
-            if mds_menu.count() > 0:
-                mds_menu.click(force=True)
-                log.info("Clicked MDS menu (fallback).")
-                page.wait_for_timeout(2000)
-            else:
-                log.warning("MDS menu not found.")
-                save_screenshot(page, "mds_menu_not_found.png")
-                return False
+            return True
+        if _dialog_or_glass_up(page):
+            log.warning("Not using MDS-menu fallback while a dialog/glass pane is up.")
+            return False
+        log.warning("MDS menu not found via exact XPath; trying fallback.")
+        mds_menu = page.locator("a:has-text('MDS'):visible, #pt1\\:pt_mFile .x18v:visible").first
+        if mds_menu.count() > 0:
+            mds_menu.click(force=True)
+            log.info("Clicked MDS menu (fallback).")
+            page.wait_for_timeout(2000)
+            return True
     except Exception as e:
         log.warning(f"Failed to click MDS menu: {e}")
         return False
+    log.warning("MDS menu not found.")
+    return False
 
+
+def _dismiss_leftover_user_dialogs_before_mds_menu(page) -> None:
+    """Close leftover pt_dlgUserDialog before MDS menu.
+
+    GADSDL/SVHC: checkbox then OK. Ordinary notice: one OK. Never OK a GADSDL
+    without the checkbox. Do not use Escape/glass as the only path.
+    Do not MDS-menu-click through a leftover Accept dcPopup.
+    """
     try:
-        accept_btn = page.locator(f"xpath={XP_ACCEPT}")
-        if accept_btn.count() > 0 and accept_btn.is_visible():
-            accept_btn.click(force=True)
-            log.info("Found Accept via exact XPath.")
-        else:
-            log.warning("Accept button not found via exact XPath; trying fallback.")
-            accept_selectors = [
-                "#pt1\\:pt_cmiAccept",
-                "a[id*='pt_cmiAccept']",
-                "li:has-text('Accept')",
-                "a:has-text('Accept')",
-                "span:has-text('Accept')",
-                "td:has-text('Accept')",
-                "[role='menuitem']:has-text('Accept')",
-                "//*[contains(text(),'Accept')]"
-            ]
-            accepted = False
-            for selector in accept_selectors:
-                try:
-                    if selector.startswith("//"):
-                        locator = page.locator(f"xpath={selector}")
-                    else:
-                        locator = page.locator(selector)
-                    if locator.count() > 0 and locator.is_visible():
-                        locator.click(force=True)
-                        log.info(f"Found Accept via fallback selector: {selector}")
-                        accepted = True
-                        break
-                except Exception as e:
-                    log.warning(f"Fallback selector {selector} failed: {e}")
-            if not accepted:
-                log.warning("Accept menu item not found; trying Ingredients toolbar Accept.")
-                for xp in XP_TOOLBAR_ACCEPT:
-                    if _click_xpath_if_present(page, xp):
-                        log.info(f"Clicked toolbar Accept via {xp}")
-                        accepted = True
-                        break
-            if not accepted:
-                log.warning("Accept menu item not found.")
-                save_screenshot(page, "accept_menu_item_not_found.png")
-                return False
+        dialog_text = visible_dialog_text(page) if modal_dialog_visible(page) else ""
+        if is_gadsdl_svhc_update_prompt(dialog_text) or gadsdl_svhc_update_visible(page):
+            acknowledge_gadsdl_svhc_update(page)
+            return
+        if _click_accept_confirm_control(page):
+            log.info("Clicked leftover Accept confirm before MDS menu.")
+            page.wait_for_timeout(1000)
+            return
+        if modal_dialog_visible(page):
+            dismiss_modal(page, allow_escape=False, save_changes="no")
     except Exception as e:
-        log.warning(f"Error clicking Accept: {e}")
-        return False
+        log.warning(f"Leftover user-dialog dismiss before MDS menu failed: {e}")
 
-    page.wait_for_timeout(2000)
 
-    try:
-        modal_btn = page.locator(f"xpath={XP_ACCEPT_MODAL}")
-        if modal_btn.count() > 0 and modal_btn.is_visible():
-            modal_btn.click(force=True)
-            log.info("Clicked Accept modal button (exact XPath).")
-            page.wait_for_timeout(2000)
-        else:
-            log.warning("Accept modal button not found via exact XPath; using fallback.")
-            modal_accept_selectors = [
-                "button:has-text('Accept'):visible",
-                "input[value='Accept']:visible",
-                "button:has-text('OK'):visible",
-                "input[value='OK']:visible",
-                "button:has-text('Yes'):visible",
-                "input[value='Yes']:visible",
-                "#pt1\\:pt_dcud\\:ctbOk",
-                "//*[contains(@id,'Accept')]//span[contains(text(),'Accept')]"
-            ]
-            modal_clicked = False
-            for selector in modal_accept_selectors:
-                try:
-                    if selector.startswith("//"):
-                        btn = page.locator(f"xpath={selector}").first
-                    else:
-                        btn = page.locator(selector).first
-                    if btn.count() > 0 and btn.is_visible():
-                        btn.click(force=True)
-                        log.info(f"Found modal Accept button via fallback selector: {selector}")
-                        modal_clicked = True
-                        break
-                except:
-                    continue
-            if not modal_clicked:
-                ok_btn = page.locator("button:has-text('OK'):visible, button:has-text('Confirm'):visible, input[value*='OK']:visible").first
-                if ok_btn.count() > 0:
-                    ok_btn.click(force=True)
-                    log.info("Clicked OK/Confirm on acceptance modal.")
-                else:
-                    dismiss_modal(page)
-    except Exception as e:
-        log.warning(f"Error handling Accept modal: {e}")
-        dismiss_modal(page)
-
-    try:
-        page.wait_for_selector("text='MDS accepted'", timeout=10000)
-        log.info("Acceptance confirmed (success message found).")
-    except:
+def _click_exact_accept_menu(page) -> bool:
+    """Click pt1:pt_cmiMenuAccept only. Scope to that id so many Accept nodes cannot strict-mode."""
+    for xp in XP_ACCEPT_MENU:
+        if _click_xpath_if_present(page, xp):
+            log.info(f"Found Accept via exact XPath {xp}.")
+            return True
+    for sel in ("#pt1\\:pt_cmiMenuAccept", "[id='pt1:pt_cmiMenuAccept']"):
         try:
-            page.wait_for_selector("button:has-text('Accept'):visible", state="hidden", timeout=10000)
-            log.info("Accept button disappeared – likely accepted.")
-        except:
-            log.warning("Could not confirm acceptance; check manually.")
-            save_screenshot(page, "accept_uncertain.png")
+            loc = page.locator(sel).first
+            if loc.count() > 0:
+                loc.click(force=True, timeout=5000)
+                log.info("Clicked Accept via exact id pt1:pt_cmiMenuAccept.")
+                return True
+        except Exception as e:
+            log.warning(f"Exact Accept id click failed: {e}")
+    return False
 
+
+def _click_accept_confirm_control(page) -> bool:
+    """Click the Accept confirmation in dcPopup / pt1:pt_dcud. Not Escape or glass."""
+    for xp in XP_ACCEPT_CONFIRM:
+        if _click_xpath_if_present(page, xp):
+            log.info(f"Clicked Accept confirm via {xp}")
+            return True
+    for sel in CSS_ACCEPT_CONFIRM:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() > 0:
+                loc.click(force=True, timeout=5000)
+                log.info(f"Clicked Accept confirm via {sel}")
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _wait_and_click_accept_confirm(page, timeout_ms: int = ACCEPT_CONFIRM_WAIT_MS) -> bool:
+    """Poll leftover dcPopup / pt_dcud confirm — 2s is too short for draft 0.01 MDS."""
+    step = max(200, int(ACCEPT_CONFIRM_POLL_MS))
+    attempts = max(1, int(max(timeout_ms, step) / step))
+    for _ in range(attempts):
+        if _click_accept_confirm_control(page):
+            return True
+        try:
+            page.wait_for_selector(
+                "#dcPopup\\:ctbAcceptMds, [id='dcPopup:ctbAcceptMds'], "
+                "#pt1\\:pt_dcud\\:ctbAccept, #pt1\\:pt_dcud\\:ctbAcceptMds",
+                timeout=step,
+            )
+        except Exception:
+            try:
+                page.wait_for_timeout(step)
+            except Exception:
+                pass
+    return _click_accept_confirm_control(page)
+
+
+def _cancel_leftover_accept_dialog(page) -> bool:
+    """Restore chrome: prefer Accept confirm, else Cancel. Never MDS-menu through the glass."""
+    if _click_accept_confirm_control(page):
+        log.info("Clicked leftover Accept confirm instead of cancelling.")
+        return True
+    for xp in XP_ACCEPT_CANCEL:
+        if _click_xpath_if_present(page, xp):
+            log.info(f"Cancelled leftover Accept dialog via {xp}")
+            try:
+                page.wait_for_timeout(1000)
+            except Exception:
+                pass
+            return True
+    used = _click_first_matching(page, list(CSS_ACCEPT_CANCEL))
+    if used:
+        log.info(f"Cancelled leftover Accept dialog via {used}")
+        try:
+            page.wait_for_timeout(1000)
+        except Exception:
+            pass
+        return True
+    log.warning("Leftover Accept dialog could not be confirmed or cancelled.")
+    return False
+
+
+def _finish_accept_success(page) -> bool:
+    """After confirm click, wait like a successful Accept (~10s) for MDS accepted."""
+    try:
+        page.wait_for_timeout(2000)
+    except Exception:
+        pass
+    try:
+        page.wait_for_selector("text='MDS accepted'", timeout=8000)
+        log.info("Acceptance confirmed (success message found).")
+    except Exception:
+        log.info("Accept confirmation control was clicked.")
     save_screenshot(page, "after_accept.png")
     return True
+
+
+# ---------- Accept MDS ----------
+def accept_mds(page):
+    log.info("Accepting MDS (PASS workflow) using exact XPaths...")
+    for attempt in (1, 2):
+        if _dialog_or_glass_up(page):
+            log.info(
+                "Dialog already up before MDS menu; trying Accept confirm, not MDS-menu fallback."
+            )
+            if _wait_and_click_accept_confirm(page):
+                return _finish_accept_success(page)
+            _cancel_leftover_accept_dialog(page)
+            save_screenshot(page, "accept_confirm_missing.png")
+            return False
+
+        _dismiss_leftover_user_dialogs_before_mds_menu(page)
+        if _dialog_or_glass_up(page):
+            log.warning("Dialog still up after leftover dismiss; not opening MDS menu.")
+            if _wait_and_click_accept_confirm(page):
+                return _finish_accept_success(page)
+            _cancel_leftover_accept_dialog(page)
+            save_screenshot(page, "accept_confirm_missing.png")
+            return False
+
+        if not _open_mds_file_menu(page):
+            save_screenshot(page, "mds_menu_not_found.png")
+            if attempt == 1 and not _dialog_or_glass_up(page):
+                log.info("Retrying MDS menu + exact Accept once.")
+                continue
+            return False
+
+        if not _click_exact_accept_menu(page):
+            log.warning("Accept not found via exact pt1:pt_cmiMenuAccept.")
+            if attempt == 1 and not _dialog_or_glass_up(page):
+                log.info("Retrying MDS menu + exact Accept once.")
+                continue
+            log.warning("Accept menu item not found.")
+            save_screenshot(page, "accept_menu_item_not_found.png")
+            return False
+
+        confirmed = _wait_and_click_accept_confirm(page)
+        if confirmed:
+            return _finish_accept_success(page)
+
+        log.warning("Accept modal button not found via exact XPath; confirmation did not complete.")
+        save_screenshot(page, "accept_confirm_missing.png")
+        if _dialog_or_glass_up(page):
+            log.warning(
+                "Leftover Accept dialog is up; not retrying MDS menu (that kills IMDS chrome)."
+            )
+            if _wait_and_click_accept_confirm(page):
+                return _finish_accept_success(page)
+            _cancel_leftover_accept_dialog(page)
+            save_screenshot(page, "accept_uncertain.png")
+            return False
+
+        log.warning(
+            "Accept confirmation did not complete; not treating a missing menu item as success."
+        )
+        if attempt == 1:
+            log.info("Retrying MDS menu + exact Accept once after missing confirm.")
+            continue
+        save_screenshot(page, "accept_uncertain.png")
+        return False
+    return False
 
 # ---------- Reject MDS ----------
 def reject_mds(page):
@@ -2520,6 +3052,10 @@ def reject_mds(page):
                 menu_clicked = True
                 break
             else:
+                if _dialog_or_glass_up(page):
+                    log.warning("Not using MDS-menu fallback while a dialog/glass pane is up.")
+                    page.wait_for_timeout(1000)
+                    continue
                 log.warning(f"Attempt {attempt+1}: MDS menu not found, trying fallback.")
                 mds_menu = page.locator("a:has-text('MDS'):visible, #pt1\\:pt_mFile .x18v:visible").first
                 if mds_menu.count() > 0:
@@ -2636,67 +3172,8 @@ def reject_mds(page):
     save_screenshot(page, "after_reject.png")
     return True
 
-def _click_xpath_if_present(page, xpath, *, hover_first: bool = False) -> bool:
-    """Click an ADF node if it exists. Do not require is_visible() — submenu wrappers often fail that check."""
-    try:
-        loc = page.locator(f"xpath={xpath}")
-        if loc.count() == 0:
-            return False
-        target = loc.first
-        if hover_first:
-            try:
-                target.hover(force=True, timeout=3000)
-                page.wait_for_timeout(400)
-            except Exception:
-                pass
-        target.click(force=True, timeout=5000)
-        return True
-    except Exception:
-        return False
-
-
-# ---------- Forward MDS ----------
-def forward_mds(page):
-    log.info("Forwarding MDS using exact XPaths...")
-    dismiss_modal(page)
-    for xp in XP_TOOLBAR_FORWARD:
-        if _click_xpath_if_present(page, xp):
-            log.info(f"Clicked Ingredients toolbar Forward via {xp}")
-            page.wait_for_timeout(2000)
-            try:
-                ok_btn = page.locator(f"xpath={XP_FORWARD_OK}")
-                if ok_btn.count() > 0:
-                    ok_btn.first.click(force=True)
-                    log.info("Clicked OK on Forward modal (exact XPath).")
-                    page.wait_for_timeout(2000)
-            except Exception:
-                dismiss_modal(page)
-            page.wait_for_load_state("networkidle", timeout=15000)
-            page.wait_for_timeout(2000)
-            save_screenshot(page, "after_forward.png")
-            return True
-    try:
-        mds_menu = page.locator(f"xpath={XP_MDS_MENU}")
-        if mds_menu.count() > 0 and mds_menu.is_visible():
-            mds_menu.click(force=True)
-            log.info("Clicked MDS menu (exact XPath).")
-            page.wait_for_timeout(2000)
-        else:
-            log.warning("MDS menu not found via exact XPath; trying fallback.")
-            mds_menu = page.locator("a:has-text('MDS'):visible, #pt1\\:pt_mFile .x18v:visible").first
-            if mds_menu.count() > 0:
-                mds_menu.click(force=True)
-                log.info("Clicked MDS menu (fallback).")
-                page.wait_for_timeout(2000)
-            else:
-                log.warning("MDS menu not found.")
-                save_screenshot(page, "mds_menu_not_found_forward.png")
-                return False
-    except Exception as e:
-        log.warning(f"Failed to click MDS menu: {e}")
-        return False
-
-    forward_clicked = False
+def _click_exact_forward_main(page) -> bool:
+    """Click the Forward *menu* (pt_mMenuForward), not a leftover user dialog."""
     try:
         forward_main = page.locator(f"xpath={XP_FORWARD_MENU}")
         if forward_main.count() > 0 and forward_main.is_visible():
@@ -2708,114 +3185,116 @@ def forward_mds(page):
             forward_main.click(force=True)
             log.info("Clicked Forward main menu item (exact XPath).")
             page.wait_for_timeout(1000)
-            forward_clicked = True
-        else:
-            log.warning("Forward main menu wrapper not visible; trying same-id td/a cells.")
-            for xp in XP_FORWARD_MENU_CLICK:
-                if _click_xpath_if_present(page, xp, hover_first=True):
-                    log.info(f"Clicked Forward via XPath: {xp}")
-                    page.wait_for_timeout(800)
-                    forward_clicked = True
-                    break
-            if not forward_clicked:
-                forward_selectors = [
-                    "xpath=//*[contains(@id,'cmiMenuForward')]",
-                    "xpath=//*[contains(@id,'mMenuForward')]",
-                    "a:has-text('Forward')",
-                    "li:has-text('Forward')",
-                    "td:has-text('Forward')",
-                    "[role='menuitem']:has-text('Forward')",
-                ]
-                for selector in forward_selectors:
-                    try:
-                        if selector.startswith("xpath="):
-                            loc = page.locator(selector[6:])
-                        else:
-                            loc = page.locator(selector)
-                        if loc.count() == 0:
-                            continue
-                        loc.first.click(force=True, timeout=5000)
-                        log.info(f"Clicked Forward via fallback selector: {selector}")
-                        forward_clicked = True
-                        page.wait_for_timeout(800)
-                        break
-                    except Exception as e:
-                        log.warning(f"Fallback selector {selector} failed: {e}")
-            if not forward_clicked:
-                for xp in XP_TOOLBAR_FORWARD:
-                    if _click_xpath_if_present(page, xp):
-                        log.info(f"Clicked Ingredients toolbar Forward via {xp}")
-                        forward_clicked = True
-                        break
-            if not forward_clicked:
-                log.warning("Forward menu item not found.")
-                save_screenshot(page, "forward_menu_not_found.png")
-                return False
+            return True
     except Exception as e:
-        log.warning(f"Error clicking Forward main menu: {e}")
-        return False
+        log.warning(f"Forward main menu exact click failed: {e}")
+    log.warning("Forward main menu wrapper not visible; trying same-id td/a cells.")
+    for xp in XP_FORWARD_MENU_CLICK:
+        if _click_xpath_if_present(page, xp, hover_first=True):
+            log.info(f"Clicked Forward via XPath: {xp}")
+            page.wait_for_timeout(800)
+            return True
+    for sel in ("#pt1\\:pt_mMenuForward", "[id='pt1:pt_mMenuForward']"):
+        try:
+            loc = page.locator(sel).first
+            if loc.count() > 0:
+                loc.click(force=True, timeout=5000)
+                log.info("Clicked Forward main menu via exact id pt1:pt_mMenuForward.")
+                page.wait_for_timeout(800)
+                return True
+        except Exception as e:
+            log.warning(f"Exact Forward menu id click failed: {e}")
+    return False
 
-    action_clicked = False
-    for xp in [XP_FORWARD_ACTION2, XP_FORWARD_ACTION1]:
+
+def _click_exact_forward_action(page) -> bool:
+    """Click pt1:pt_cmiMenuForward only. Never a leftover user-dialog td."""
+    for xp in XP_FORWARD_ACTION:
         if _click_xpath_if_present(page, xp):
             log.info(f"Clicked Forward action via XPath: {xp}")
-            action_clicked = True
-            break
-
-    if not action_clicked:
-        log.warning("Forward action not found; trying fallback.")
+            return True
+    for sel in ("#pt1\\:pt_cmiMenuForward", "[id='pt1:pt_cmiMenuForward']"):
         try:
-            action = page.locator("td:has-text('Forward'), a:has-text('Forward')").first
-            if action.count() > 0:
-                action.click(force=True)
-                log.info("Clicked Forward action by text fallback.")
-                action_clicked = True
+            loc = page.locator(sel).first
+            if loc.count() > 0:
+                loc.click(force=True, timeout=5000)
+                log.info("Clicked Forward action via exact id pt1:pt_cmiMenuForward.")
+                return True
         except Exception as e:
-            log.warning(f"Text fallback failed: {e}")
+            log.warning(f"Exact Forward action id click failed: {e}")
+    return False
 
-    if not action_clicked and forward_clicked:
-        log.info("Forward submenu click may have been the action; continuing.")
-        action_clicked = True
 
-    if not action_clicked:
-        log.warning("Forward action not found after all attempts.")
+def _click_forward_ok(page) -> None:
+    try:
+        ok_btn = page.locator(f"xpath={XP_FORWARD_OK}")
+        if ok_btn.count() > 0:
+            ok_btn.first.click(force=True)
+            log.info("Clicked OK on Forward modal (exact XPath).")
+            page.wait_for_timeout(2000)
+            return
+        log.warning("OK modal button not found via exact XPath; trying pt_dcud OK.")
+        ok_btn = page.locator("#pt1\\:pt_dcud\\:ctbOk").first
+        if ok_btn.count() > 0:
+            ok_btn.click(force=True)
+            log.info("Clicked OK on Forward modal (pt_dcud).")
+            page.wait_for_timeout(2000)
+            return
+        log.warning("OK button not found on Forward modal.")
+    except Exception as e:
+        log.warning(f"Error handling Forward modal: {e}")
+
+
+# ---------- Forward MDS ----------
+def forward_mds(page):
+    log.info("Forwarding MDS using exact XPaths...")
+    _dismiss_leftover_user_dialogs_before_mds_menu(page)
+    for xp in XP_TOOLBAR_FORWARD:
+        if _click_xpath_if_present(page, xp):
+            log.info(f"Clicked Ingredients toolbar Forward via {xp}")
+            page.wait_for_timeout(2000)
+            _click_forward_ok(page)
+            try:
+                page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+            save_screenshot(page, "after_forward.png")
+            return True
+
+    def _open_and_click_forward_action() -> bool:
+        if not _open_mds_file_menu(page):
+            save_screenshot(page, "mds_menu_not_found_forward.png")
+            return False
+        if not _click_exact_forward_main(page):
+            for xp in XP_TOOLBAR_FORWARD:
+                if _click_xpath_if_present(page, xp):
+                    log.info(f"Clicked Ingredients toolbar Forward via {xp}")
+                    return True
+            log.warning("Forward menu item not found.")
+            save_screenshot(page, "forward_menu_not_found.png")
+            return False
+        if _click_exact_forward_action(page):
+            return True
+        log.warning("Forward action not visible; closing dialogs and reopening MDS menu.")
+        _dismiss_leftover_user_dialogs_before_mds_menu(page)
+        if not _open_mds_file_menu(page):
+            return False
+        if not _click_exact_forward_main(page):
+            return False
+        return _click_exact_forward_action(page)
+
+    if not _open_and_click_forward_action():
+        log.warning("Forward action not found after exact XPath retries.")
         save_screenshot(page, "forward_action_not_found.png")
         return False
 
     page.wait_for_timeout(2000)
-
+    _click_forward_ok(page)
     try:
-        ok_btn = page.locator(f"xpath={XP_FORWARD_OK}")
-        if ok_btn.count() > 0 and ok_btn.is_visible():
-            ok_btn.click(force=True)
-            log.info("Clicked OK on Forward modal (exact XPath).")
-            page.wait_for_timeout(2000)
-            for _ in range(3):
-                page.wait_for_timeout(500)
-                if page.locator(".AFModalGlassPane").count() == 0:
-                    break
-                dismiss_modal(page)
-        else:
-            log.warning("OK modal button not found via exact XPath; trying fallback.")
-            ok_btn = page.locator("button:has-text('OK'):visible, input[value='OK']:visible, #pt1\\:pt_dcud\\:ctbOk").first
-            if ok_btn.count() > 0 and ok_btn.is_visible():
-                ok_btn.click(force=True)
-                log.info("Clicked OK on Forward modal (fallback).")
-                page.wait_for_timeout(2000)
-                for _ in range(3):
-                    page.wait_for_timeout(500)
-                    if page.locator(".AFModalGlassPane").count() == 0:
-                        break
-                    dismiss_modal(page)
-            else:
-                log.warning("OK button not found; trying to dismiss modal.")
-                dismiss_modal(page)
-                page.wait_for_timeout(2000)
-    except Exception as e:
-        log.warning(f"Error handling Forward modal: {e}")
-        dismiss_modal(page)
-
-    page.wait_for_load_state("networkidle", timeout=15000)
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        pass
     page.wait_for_timeout(2000)
     save_screenshot(page, "after_forward.png")
     return True
@@ -3121,21 +3600,21 @@ def wait_for_forwarded_own_mds(page, received_id: str, timeout_s: float = 25) ->
             own = "component (own mds)" in body.lower() or "forwarded version of a received mds" in body.lower()
         except Exception:
             own = False
-        if last_num and received_num and last_num != received_num:
+        if own_mds_ready_for_recipients(received_id, last):
             log.info(
                 f"Forward created own MDS {last} from received {received_id}. "
                 "Completing contact, recipients, and propose on this new ID (not the received ID)."
             )
             return last_num
-        if own and last_num:
+        if own and last_num and last_num != received_num:
             log.info(f"On forwarded own MDS {last}; completing contact/recipients/propose here.")
             return last_num
         page.wait_for_timeout(500)
     log.warning(
         f"Did not see a new own-MDS ID after Forward (still {last!r} vs received {received_id}). "
-        "Completing contact/recipients/propose on the open sheet anyway."
+        "Not completing contact/recipients/propose on the received sheet."
     )
-    return parse_mds_id_number(last) or received_num or ""
+    return ""
 
 
 def _open_detail_tab(page, xpath: str, name: str, screenshot: str) -> bool:
@@ -3955,6 +4434,9 @@ def search_mds_by_id(page, mds_id_num: str) -> bool:
     If Browsed-only returns no rows, retry with all statuses. Opening the MDS
     still marks it browsed so Accept stays active.
     """
+    if not is_searchable_mds_id(mds_id_num):
+        log.warning(f"Not searching invalid MDS ID {mds_id_num!r}.")
+        return False
     wait_for_glass_pane_clear(page, timeout_ms=5000, save_changes="no")
     if not navigate_to_search_page(page):
         return False
@@ -4012,10 +4494,75 @@ def _double_click_first_result(page, mds_id_num: str) -> bool:
             return False
 
 
+def ensure_inbox_row_opened_as_mds(page, row_xpath: str) -> bool:
+    """After inbox double-click, wait for Ingredients ID — not tResult Export chrome."""
+    for attempt in range(1, 3):
+        dismiss_modal(page, allow_escape=False, save_changes="no")
+        if still_on_inbox_result_list(page):
+            log.warning(
+                f"Still on the inbox/search table after open (attempt {attempt}/2); "
+                "not treating Export/hidden-column chrome as an MDS ID."
+            )
+            if attempt < 2:
+                try:
+                    page.locator(f"xpath={row_xpath}").first.dblclick(force=True)
+                    log.info("Double-clicked inbox row again to open Ingredients.")
+                except Exception as e:
+                    log.warning(f"Retry double-click failed: {e}")
+                    try:
+                        page.locator(f"xpath={row_xpath}").click(force=True)
+                        page.keyboard.press("Enter")
+                    except Exception:
+                        pass
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(2000)
+                continue
+            return False
+        ensure_ingredients_ready_for_check(page)
+        vis = read_visible_mds_id(page)
+        if looks_like_mds_id_value(vis) or ingredients_tree_ready(page):
+            return True
+        extracted = extract_mds_id_version_early(page)
+        if looks_like_mds_id_value(extracted):
+            return True
+        if attempt < 2:
+            log.warning("Ingredients ID field not numeric yet; retrying open.")
+            try:
+                page.locator(f"xpath={row_xpath}").first.dblclick(force=True)
+            except Exception:
+                pass
+            try:
+                page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass
+            page.wait_for_timeout(1500)
+    return (
+        not still_on_inbox_result_list(page)
+        and (
+            ingredients_tree_ready(page)
+            or looks_like_mds_id_value(read_visible_mds_id(page))
+        )
+    )
+
+
 def open_first_result_on_content_page(page, mds_id_num: str) -> bool:
     """Double-click the first result and wait for the Ingredients page for that MDS ID."""
     for attempt in range(1, 4):
         if not _double_click_first_result(page, mds_id_num):
+            return False
+        if still_on_inbox_result_list(page):
+            log.warning(
+                f"Open attempt {attempt}/3 for {mds_id_num} is still on the inbox/search table; "
+                "not scraping Export/hidden-column chrome as an MDS ID."
+            )
+            dismiss_modal(page, allow_escape=False, save_changes="no")
+            if attempt < 3:
+                if not search_mds_by_id(page, mds_id_num):
+                    return False
+                continue
             return False
         if wait_for_mds_content_page(page, expected_id=mds_id_num):
             save_screenshot(page, f"after_open_content_{mds_id_num}.png")
@@ -4041,11 +4588,21 @@ def accept_passed_mds(page, results):
             log.info(f"Skipping row {idx+1} (already {res.get('Action Result')})")
             continue
 
-        mds_id_num = res["MDS ID / Version"].split('/')[0].strip()
+        if not is_searchable_mds_id(res.get("MDS ID / Version")):
+            log.warning(
+                f"Skipping accept for invalid MDS ID {res.get('MDS ID / Version')!r}."
+            )
+            if not action_result_is_complete(res.get("Action Result", "")):
+                res["Action Result"] = "Skipped (invalid MDS ID)"
+            save_check_summary(results)
+            continue
+        mds_id_num = parse_mds_id_number(res["MDS ID / Version"])
         supplier_code = res.get("Supplier Code", "")
         part_no = res.get("Part/Item No.", "")
         log.info(f"Searching for MDS ID: {mds_id_num}")
-        if not logged_in_to_imds(page) or page_looks_offline(page):
+        if page_looks_offline(page) or (
+            on_public_login_page(page) and not logged_in_to_imds(page)
+        ):
             if not ensure_imds_session(page):
                 res["Action Result"] = "Search Failed"
                 save_check_summary(results)
@@ -4067,16 +4624,19 @@ def accept_passed_mds(page, results):
             log.warning("Acceptance failed; skipping forwarding.")
             res["Action Result"] = "Accept Failed"
             save_check_summary(results)
+            if not leave_own_mds_for_inbox(page):
+                log.warning("Could not restore Received MDSs search after Accept Failed.")
             continue
 
         handle_forward_confirmation_modal(page)
         page.wait_for_timeout(1500)
         wait_for_glass_pane_clear(page, timeout_ms=5000)
         current_id = read_visible_mds_id(page) or extract_mds_id_version_early(page)
-        auto_forwarded = mds_open_status(current_id, mds_id_num) == "mismatch"
+        auto_forwarded = own_mds_ready_for_recipients(mds_id_num, current_id)
         forward_note = ""
+        forwarded_id = parse_mds_id_number(current_id) if auto_forwarded else ""
         if auto_forwarded:
-            new_id = parse_mds_id_number(current_id) or current_id
+            new_id = forwarded_id or current_id
             log.warning(
                 f"IMDS auto-forwarded after Accept; on-screen ID is {current_id} "
                 f"(searched {mds_id_num}). Skipping a second Forward and proposing on {new_id}."
@@ -4089,16 +4649,33 @@ def accept_passed_mds(page, results):
                 click_ingredients_tab(page)
                 wait_for_mds_content_page(page, expected_id=mds_id_num, save_changes="yes")
             if not forward_mds(page):
-                log.warning("Forwarding failed; still attempting recipient/propose on the open MDS.")
+                log.warning("Forwarding failed; will retry once if the ID is still the received MDS.")
                 forward_note = "Forward Failed"
-            else:
-                log.info("Forward successful.")
             forwarded_id = wait_for_forwarded_own_mds(page, mds_id_num)
-            if forwarded_id and forwarded_id != mds_id_num:
+            if not own_mds_ready_for_recipients(mds_id_num, forwarded_id):
+                log.warning(
+                    "On-screen MDS ID is still the received ID; retrying Forward once with exact XPaths."
+                )
+                _dismiss_leftover_user_dialogs_before_mds_menu(page)
+                if forward_mds(page):
+                    forward_note = ""
+                forwarded_id = wait_for_forwarded_own_mds(page, mds_id_num)
+            if own_mds_ready_for_recipients(mds_id_num, forwarded_id):
                 log.info(
                     f"Received MDS {mds_id_num} is now own MDS {forwarded_id}. "
                     "Will not search the received ID again until contact/recipients/propose finish on this sheet."
                 )
+                if forward_note == "Forward Failed":
+                    forward_note = ""
+            else:
+                log.warning(
+                    "Forward did not mint a new own MDS; leaving the inbox without Add Recipient."
+                )
+                res["Action Result"] = "Forward Failed"
+                save_check_summary(results)
+                if not leave_own_mds_for_inbox(page):
+                    log.warning("Could not return to Received MDSs search after Forward Failed.")
+                continue
 
         ok, recipient_msg = False, "Recipient assignment Failed"
         for cycle in range(1, 4):
@@ -4113,23 +4690,18 @@ def accept_passed_mds(page, results):
             dismiss_modal(page, allow_escape=False)
             wait_for_glass_pane_clear(page, timeout_ms=4000, allow_escape=False)
         if ok:
-            if forward_note == "Forward Failed":
-                res["Action Result"] = f"Forward Failed; {recipient_msg}"
-            elif forward_note == "Auto-forwarded":
+            if forward_note == "Auto-forwarded":
                 res["Action Result"] = "Auto-forwarded, proposed"
             else:
                 res["Action Result"] = recipient_msg
             log.info("Recipient assignment successful.")
         else:
-            prefix = f"{forward_note}; " if forward_note == "Forward Failed" else ""
-            res["Action Result"] = prefix + recipient_msg
+            res["Action Result"] = recipient_msg
             log.warning("Recipient assignment incomplete.")
         save_check_summary(results)
 
-        close_check_results_dialog(page)
-        if not navigate_to_search_page(page):
+        if not leave_own_mds_for_inbox(page):
             log.warning("Could not return to Received MDSs search after propose; leftover MDS may remain open.")
-        wait_for_glass_pane_clear(page, timeout_ms=4000, save_changes="no")
 
     log.info("Acceptance, forwarding, and recipient assignment completed.")
 
@@ -4145,9 +4717,19 @@ def reject_failed_mds(page, results):
             log.info(f"Skipping row {idx+1} (already {res.get('Action Result')})")
             continue
 
-        mds_id_num = res["MDS ID / Version"].split('/')[0].strip()
+        if not is_searchable_mds_id(res.get("MDS ID / Version")):
+            log.warning(
+                f"Skipping reject for invalid MDS ID {res.get('MDS ID / Version')!r}."
+            )
+            if not action_result_is_complete(res.get("Action Result", "")):
+                res["Action Result"] = "Skipped (invalid MDS ID)"
+            save_check_summary(results)
+            continue
+        mds_id_num = parse_mds_id_number(res["MDS ID / Version"])
         log.info(f"Rejecting MDS ID: {mds_id_num}")
-        if not logged_in_to_imds(page) or page_looks_offline(page):
+        if page_looks_offline(page) or (
+            on_public_login_page(page) and not logged_in_to_imds(page)
+        ):
             if not ensure_imds_session(page):
                 res["Action Result"] = "Search Failed"
                 save_check_summary(results)
@@ -4173,15 +4755,77 @@ def reject_failed_mds(page, results):
             res["Action Result"] = "Rejected"
         save_check_summary(results)
 
-        if not navigate_to_search_page(page):
+        if not leave_own_mds_for_inbox(page):
             log.warning("Could not return to Received MDSs search after reject.")
-        wait_for_glass_pane_clear(page, timeout_ms=4000, save_changes="no")
 
     log.info("Rejection of FAIL MDSs completed.")
 
 # ---------- Main Loop ----------
 INBOX_SEARCH_TAB = "//*[@id='pt1:sdiInboxSearch::disAcr']"
 INBOX_FIRST_ROW = "//*[@id='pt1:dcCmds:sfIbLU:pc2:tResult:0:cName']"
+
+
+def inbox_row_xpath(index: int) -> str:
+    return f"//*[@id='pt1:dcCmds:sfIbLU:pc2:tResult:{index}:cName']"
+
+
+def inbox_row_visible(page, index: int) -> bool:
+    try:
+        loc = page.locator(f"xpath={inbox_row_xpath(index)}")
+        return loc.count() > 0
+    except Exception:
+        return False
+
+
+def inbox_results_table_ready(page) -> bool:
+    """True when a result name cell is in the DOM."""
+    try:
+        if page.locator(f"xpath={INBOX_FIRST_ROW}").count() > 0:
+            return True
+        if page.locator(
+            "xpath=//*[contains(@id,'tResult:') and contains(@id,':cName')]"
+        ).count() > 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def next_visible_inbox_index(page, start: int = 0, limit: int = 40) -> int | None:
+    for n in range(start, limit):
+        if inbox_row_visible(page, n):
+            return n
+    return None
+
+
+def recover_inbox_list(page, *, reapply_filter: bool = True) -> bool:
+    """Return to Received MDSs and restore the not-yet-browsed list. Never a network wait."""
+    wait_for_imds_chrome(page)
+    ok = False
+    try:
+        if _click_received_mds_link(page):
+            ok = True
+        elif _click_received_mds_menu(page):
+            ok = True
+        else:
+            ok = return_to_inbox_results(page)
+    except Exception as e:
+        log.warning(f"Inbox recover via Received MDSs failed: {e}")
+        ok = False
+    if not ok:
+        try:
+            ok = navigate_to_search_page(page)
+        except Exception as e:
+            log.warning(f"Inbox recover navigate failed: {e}")
+            return False
+    wait_for_imds_chrome(page)
+    if reapply_filter or not inbox_results_table_ready(page):
+        try:
+            apply_not_yet_browsed_filter_and_search(page)
+        except Exception as e:
+            log.warning(f"Re-applying not-yet-browsed filter failed: {e}")
+            return False
+    return inbox_results_table_ready(page) or _search_id_field_ready(page)
 
 
 def return_to_inbox_results(page) -> bool:
@@ -4195,8 +4839,15 @@ def return_to_inbox_results(page) -> bool:
         if back_btn.count() > 0:
             back_btn.click(force=True)
             log.info("Clicked Received MDSs / Inbox search tab.")
+        elif _click_received_mds_link(page):
+            log.info("Inbox tab missing; used Received MDSs link.")
+        elif _click_received_mds_menu(page):
+            log.info("Inbox tab missing; used Received MDSs menu.")
         elif not navigate_to_search_page(page):
-            page.go_back()
+            log.warning(
+                "Could not return via Received MDSs; not using browser Back on a live sheet."
+            )
+            return False
         wait_networkidle(page, 15000)
         page.wait_for_timeout(1500)
         close_check_results_dialog(page, any_check_overlay=True)
@@ -4218,9 +4869,12 @@ def process_rows_and_export(page):
 
     i = 0
     network_retries = 0
-    while i < NUM_ITERATIONS:
-        row_xpath = f"//*[@id='pt1:dcCmds:sfIbLU:pc2:tResult:{i}:cName']"
-        log.info(f"Processing MDS row {i+1}/{NUM_ITERATIONS} using XPath: {row_xpath}")
+    processed_ids: set[str] = set()
+    while len(results) < NUM_ITERATIONS and i < 40:
+        row_xpath = inbox_row_xpath(i)
+        log.info(
+            f"Processing MDS row {len(results)+1}/{NUM_ITERATIONS} using XPath: {row_xpath}"
+        )
         supplier_code = ""
         part_no = ""
         mds_id = "EXTRACTION_FAILED"
@@ -4232,9 +4886,18 @@ def process_rows_and_export(page):
         retry_same = False
 
         try:
-            if not logged_in_to_imds(page) or page_looks_offline(page):
+            if page_looks_offline(page) or (
+                on_public_login_page(page) and not logged_in_to_imds(page)
+            ):
                 if not ensure_imds_session(page):
                     raise RuntimeError("IMDS session could not be restored after a network drop.")
+            elif not logged_in_to_imds(page) or not inbox_results_table_ready(page):
+                log.info(
+                    "Inbox list missing or chrome not ready; recovering via "
+                    "Received MDSs + re-filter (not a network drop)."
+                )
+                if not recover_inbox_list(page):
+                    log.warning("Could not restore the inbox list; will try this row anyway.")
             row_element = page.locator(row_xpath)
             try:
                 row_element.wait_for(state="visible", timeout=10000)
@@ -4242,17 +4905,33 @@ def process_rows_and_export(page):
                 log.warning(
                     f"Row {i} not visible ({e}); returning to the Received MDSs list and retrying."
                 )
-                return_to_inbox_results(page)
-                row_element = page.locator(row_xpath)
+                recover_inbox_list(page)
+                if not inbox_row_visible(page, i):
+                    nxt = next_visible_inbox_index(page, 0)
+                    if nxt is None:
+                        log.info("No more visible inbox rows after refresh.")
+                        break
+                    if nxt != i:
+                        log.info(
+                            f"Indexed row {i} is gone after refresh; "
+                            f"continuing remaining visible rows from index {nxt}."
+                        )
+                        i = nxt
+                        retry_same = True
+                        raise RuntimeError("inbox row index shifted after refresh")
+                row_element = page.locator(f"xpath={inbox_row_xpath(i)}")
                 try:
                     row_element.wait_for(state="visible", timeout=15000)
                 except Exception as e2:
-                    first = page.locator(f"xpath={INBOX_FIRST_ROW}")
-                    if first.count() > 0:
+                    nxt = next_visible_inbox_index(page, 0)
+                    if nxt is not None and nxt != i:
                         log.info(
-                            f"Inbox list is showing but row {i} is absent; no more MDS rows."
+                            f"Inbox list is showing but row {i} is absent; "
+                            "indexes may have shifted — continuing remaining visible rows."
                         )
-                        break
+                        i = nxt
+                        retry_same = True
+                        raise RuntimeError("inbox row index shifted after refresh")
                     log.warning(f"Row {i} still not found: {e2}. Continuing with remaining rows.")
                     raise
             log.info(f"Row {i} found and visible.")
@@ -4290,80 +4969,145 @@ def process_rows_and_export(page):
 
             wait_networkidle(page, 15000)
             page.wait_for_timeout(2000)
-            dismiss_modal(page)
+            dismiss_modal(page, allow_escape=False, save_changes="no")
+            if not ensure_inbox_row_opened_as_mds(page, row_xpath):
+                log.warning(
+                    "Did not reach Ingredients after double-click; not checking from the inbox table."
+                )
+                mds_id = "EXTRACTION_FAILED"
+                result_msg = "Open Failed (still on inbox list)"
+                overall = "FAIL"
+                results.append({
+                    "MDS ID / Version": mds_id,
+                    "Check Result": result_msg,
+                    "Parts Marking Check": "Unknown",
+                    "Recyclate Check": "Unknown",
+                    "Biocidal Check": "Unknown",
+                    "Overall Result": overall,
+                    "Supplier Code": supplier_code,
+                    "Part/Item No.": part_no,
+                    "Action Result": "Open Failed",
+                })
+                log.info(
+                    f"Row {len(results)}: {mds_id} -> Check: {result_msg} | "
+                    f"Overall: {overall} | Supplier: {supplier_code} | Part: {part_no}"
+                )
+            else:
+                ensure_ingredients_ready_for_check(page)
 
-            mds_id = extract_mds_id_version_early(page)
-            log.info(f"Extracted ID/Version: {mds_id}")
-
-            expand_tree(page)
-            dismiss_modal(page)
-
-            if mds_id == "EXTRACTION_FAILED":
                 mds_id = extract_mds_id_version_early(page)
-                log.info(f"Retry ID extraction: {mds_id}")
+                log.info(f"Extracted ID/Version: {mds_id}")
+                if not looks_like_mds_id_value(mds_id):
+                    log.warning(
+                        f"Extracted {mds_id!r} is not a numeric MDS ID; "
+                        "not checking from the inbox table."
+                    )
+                    result_msg = "Open Failed (inbox chrome ID)"
+                    overall = "FAIL"
+                    results.append({
+                        "MDS ID / Version": "EXTRACTION_FAILED",
+                        "Check Result": result_msg,
+                        "Parts Marking Check": "Unknown",
+                        "Recyclate Check": "Unknown",
+                        "Biocidal Check": "Unknown",
+                        "Overall Result": overall,
+                        "Supplier Code": supplier_code,
+                        "Part/Item No.": part_no,
+                        "Action Result": "Open Failed",
+                    })
+                    log.info(
+                        f"Row {len(results)}: EXTRACTION_FAILED -> Check: {result_msg} | "
+                        f"Overall: {overall} | Supplier: {supplier_code} | Part: {part_no}"
+                    )
+                    mds_id = "EXTRACTION_FAILED"
+                else:
+                    seen = parse_mds_id_number(mds_id)
+                    if seen and seen in processed_ids:
+                        log.info(f"Already processed {mds_id}; skipping duplicate after list refresh.")
+                        nxt = next_visible_inbox_index(page, i + 1)
+                        if nxt is None:
+                            recover_inbox_list(page)
+                            nxt = next_visible_inbox_index(page, 0)
+                        if nxt is None or nxt == i:
+                            log.info("No remaining unread inbox rows after skipping a duplicate.")
+                            break
+                        i = nxt
+                        retry_same = True
+                        raise RuntimeError("inbox row index shifted after refresh")
 
-            capture_all_material_nodes(page, i + 1)
+                    expand_tree(page)
+                    dismiss_modal(page)
 
-            rule_results = run_checks_on_mds(page, i + 1, mds_id)
+                    if mds_id == "EXTRACTION_FAILED":
+                        mds_id = extract_mds_id_version_early(page)
+                        log.info(f"Retry ID extraction: {mds_id}")
 
-            if click_first_tree_node(page):
-                page.wait_for_timeout(1000)
-            else:
-                log.warning("Could not click first tree node; continuing anyway.")
+                    capture_all_material_nodes(page, i + 1)
 
-            check_success = run_check(page)
-            try:
-                save_screenshot(page, f"mds_check_{i+1}.png")
-            except Exception as e:
-                log.warning(f"Check screenshot failed: {e}")
-            extracted = extract_check_result(page)
-            if is_check_clean(extracted) or check_results_present(extracted):
-                if not check_success:
-                    log.info(f"Check waiter missed the panel; using extracted result: {extracted}")
-                result_msg = extracted
-            elif check_success:
-                result_msg = extracted
-            else:
-                result_msg = "Check failed"
-                log.warning(f"Check waiter failed; extracted {extracted!r}")
+                    rule_results = run_checks_on_mds(page, i + 1, mds_id)
 
-            check_clean = is_check_clean(result_msg)
-            recyclate_ok = rule_results.get("recyclate_check") == "PASS"
-            biocidal_ok = rule_results.get("biocidal_check") == "PASS"
-            overall = "PASS" if (check_clean and recyclate_ok and biocidal_ok) else "FAIL"
+                    if click_first_tree_node(page):
+                        page.wait_for_timeout(1000)
+                    else:
+                        log.warning("Could not click first tree node; continuing anyway.")
 
-            results.append({
-                "MDS ID / Version": mds_id,
-                "Check Result": result_msg,
-                "Parts Marking Check": rule_results.get("parts_marking_check", "Unknown"),
-                "Recyclate Check": rule_results.get("recyclate_check", "Unknown"),
-                "Biocidal Check": rule_results.get("biocidal_check", "Unknown"),
-                "Overall Result": overall,
-                "Supplier Code": supplier_code,
-                "Part/Item No.": part_no,
-                "Action Result": "Pending action",
-            })
-            log.info(
-                f"Row {i+1}: {mds_id} -> Check: {result_msg} | "
-                f"Parts: {rule_results['parts_marking_check']} | "
-                f"Recyclate: {rule_results['recyclate_check']} | "
-                f"Biocidal: {rule_results['biocidal_check']} | Overall: {overall} | "
-                f"Supplier: {supplier_code} | Part: {part_no}"
-            )
+                    check_success = run_check(page)
+                    try:
+                        save_screenshot(page, f"mds_check_{i+1}.png")
+                    except Exception as e:
+                        log.warning(f"Check screenshot failed: {e}")
+                    extracted = extract_check_result(page)
+                    if is_check_clean(extracted) or check_results_present(extracted):
+                        if not check_success:
+                            log.info(f"Check waiter missed the panel; using extracted result: {extracted}")
+                        result_msg = extracted
+                    elif check_success:
+                        result_msg = extracted
+                    else:
+                        result_msg = "Check failed"
+                        log.warning(f"Check waiter failed; extracted {extracted!r}")
+
+                    check_clean = is_check_clean(result_msg)
+                    recyclate_ok = rule_results.get("recyclate_check") == "PASS"
+                    biocidal_ok = rule_results.get("biocidal_check") == "PASS"
+                    overall = "PASS" if (check_clean and recyclate_ok and biocidal_ok) else "FAIL"
+
+                    results.append({
+                        "MDS ID / Version": mds_id,
+                        "Check Result": result_msg,
+                        "Parts Marking Check": rule_results.get("parts_marking_check", "Unknown"),
+                        "Recyclate Check": rule_results.get("recyclate_check", "Unknown"),
+                        "Biocidal Check": rule_results.get("biocidal_check", "Unknown"),
+                        "Overall Result": overall,
+                        "Supplier Code": supplier_code,
+                        "Part/Item No.": part_no,
+                        "Action Result": "Pending action",
+                    })
+                    if seen := parse_mds_id_number(mds_id):
+                        processed_ids.add(seen)
+                    log.info(
+                        f"Row {len(results)}: {mds_id} -> Check: {result_msg} | "
+                        f"Parts: {rule_results['parts_marking_check']} | "
+                        f"Recyclate: {rule_results['recyclate_check']} | "
+                        f"Biocidal: {rule_results['biocidal_check']} | Overall: {overall} | "
+                        f"Supplier: {supplier_code} | Part: {part_no}"
+                    )
         except Exception as e:
+            if retry_same or "inbox row index shifted" in str(e).lower():
+                retry_same = True
             network = should_wait_for_network_recovery(e)
             if network:
                 log.warning(
-                    f"Row {i+1} hit a network/session drop: {e}. "
+                    f"Row {len(results)+1} hit a network/session drop: {e}. "
                     "Waiting to reconnect, then retrying this row."
                 )
                 if network_retries < 3 and recover_after_network_error(page, e):
                     network_retries += 1
                     retry_same = True
             if not retry_same:
-                log.warning(f"Row {i+1} failed: {e}. Continuing with remaining rows.")
+                log.warning(f"Row {len(results)+1} failed: {e}. Continuing with remaining rows.")
                 try:
-                    save_screenshot(page, f"mds_row_{i+1}_error.png")
+                    save_screenshot(page, f"mds_row_{len(results)+1}_error.png")
                 except Exception:
                     pass
                 results.append({
@@ -4377,15 +5121,19 @@ def process_rows_and_export(page):
                     "Part/Item No.": part_no,
                     "Action Result": "Row processing Failed",
                 })
+                if seen := parse_mds_id_number(mds_id):
+                    processed_ids.add(seen)
 
         if retry_same:
             continue
         network_retries = 0
-        if i < NUM_ITERATIONS - 1:
+        if len(results) < NUM_ITERATIONS:
             if not return_to_inbox_results(page):
                 log.warning(
-                    "Could not return to the inbox list; will retry at the start of the next row."
+                    "Could not return to the inbox list; recovering via Received MDSs "
+                    "without re-login."
                 )
+                recover_inbox_list(page)
         i += 1
 
     save_check_summary(results)
@@ -4404,6 +5152,7 @@ def orchestrate():
         return _orchestrate_in_subprocess()
 
     load_live_credentials()
+    reset_search_nav_chrome_recovery()
     _ensure_chromium_os_deps()
     if sync_playwright is None:
         raise RuntimeError("playwright is not installed. In Colab, re-run Cell 1.")
