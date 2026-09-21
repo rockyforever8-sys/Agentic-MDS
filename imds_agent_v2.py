@@ -983,6 +983,48 @@ def wait_for_imds_chrome(page, timeout_ms: int = 20000) -> bool:
     return imds_chrome_present(page)
 
 
+def page_text_indicates_public_login(text: str) -> bool:
+    """True when body text is the public IMDS landing/login, not an app screen.
+
+    Visibility-based ``on_public_login_page`` can miss Colab/headless login after
+    a session timeout while Check is running; the body still shows User ID help.
+    """
+    if not text or not str(text).strip():
+        return False
+    if check_results_present(text) or is_passing_check_results_text(text):
+        return False
+    t = str(text).lower()
+    if "received mdss" in t or "not yet browsed" in t:
+        return False
+    markers = (
+        "user id forgotten",
+        "request new password",
+        "register your company",
+        "multi-factor authentication",
+        "tips for your company registration",
+    )
+    hits = sum(1 for m in markers if m in t)
+    if hits >= 2:
+        return True
+    return "user id forgotten" in t and "registration" in t
+
+
+def needs_imds_relogin(page) -> bool:
+    """True when the browser is on (or showing) the public login, not logged-in chrome."""
+    try:
+        if logged_in_to_imds(page):
+            return False
+        if on_public_login_page(page):
+            return True
+    except Exception:
+        pass
+    try:
+        sample = page.locator("body").inner_text(timeout=5000) or ""
+    except Exception:
+        sample = ""
+    return page_text_indicates_public_login(sample)
+
+
 def on_public_login_page(page) -> bool:
     """True only when User ID / Login form controls are the active UI.
 
@@ -1081,12 +1123,12 @@ def ensure_imds_session(page) -> bool:
             return True
     except Exception:
         pass
-    live_imds = False
+    session_gone = False
     try:
-        live_imds = not page_looks_offline(page) and not on_public_login_page(page)
+        session_gone = needs_imds_relogin(page)
     except Exception:
-        live_imds = False
-    if live_imds:
+        session_gone = on_public_login_page(page)
+    if not session_gone and not page_looks_offline(page):
         log.info(
             "IMDS is still reachable; recovering the inbox list without a "
             "15-min network wait or re-login."
@@ -1100,17 +1142,18 @@ def ensure_imds_session(page) -> bool:
         except Exception:
             pass
         return False
-    if not wait_for_connectivity(page):
+    if page_looks_offline(page) and not wait_for_connectivity(page):
         return False
     wait_for_imds_chrome(page)
     login_succeeded = False
-    if on_public_login_page(page) or not logged_in_to_imds(page):
+    if needs_imds_relogin(page) or not logged_in_to_imds(page):
         log.info("Re-logging in after network/session drop.")
         imds_login(page)
         login_succeeded = True
     wait_for_imds_chrome(page)
     if session_logged_in_after_reconnect(page, login_succeeded):
-        navigate_to_search_page(page)
+        reset_search_nav_chrome_recovery()
+        navigate_to_search_page(page, allow_session_recovery=False)
         apply_not_yet_browsed_filter_and_search(page)
         return True
     log.warning("Still not logged in after reconnect.")
@@ -1953,10 +1996,13 @@ def _try_search_nav_fast(page) -> bool:
 def recover_imds_chrome_once(page) -> bool:
     """After one chrome-loss, dismiss leftover dialog then Received MDSs / MDS Request.
 
-    Do not re-login on leftover Login DOM. Do not treat this as a 15-min network wait.
+    Real session expiry (public login body) re-logs in. Do not treat as a 15-min wait.
     """
     log.info("Recovering IMDS chrome once after search-nav / chrome loss...")
     _dismiss_nav_blockers(page)
+    if needs_imds_relogin(page):
+        log.info("Chrome recovery sees expired session; re-establishing login.")
+        return ensure_imds_session(page)
     if _try_search_nav_fast(page):
         return True
     wait_for_imds_chrome(page, timeout_ms=8000)
@@ -1965,6 +2011,8 @@ def recover_imds_chrome_once(page) -> bool:
     if page_looks_offline(page):
         log.warning("Page looks offline during chrome recovery; not treating search-nav as a 15-min wait.")
         return False
+    if needs_imds_relogin(page):
+        return ensure_imds_session(page)
     if on_public_login_page(page) and not logged_in_to_imds(page):
         log.warning(
             "Leftover Login DOM during chrome recovery; not burning a second OTP."
@@ -2009,11 +2057,14 @@ def leave_own_mds_for_inbox(page) -> bool:
     return navigate_to_search_page(page)
 
 
-def navigate_to_search_page(page):
+def navigate_to_search_page(page, *, allow_session_recovery: bool = True):
     log.info("Navigating to Received MDSs search page...")
     global _SEARCH_NAV_CHROME_RECOVERED
     # Dismiss leftover Accept / save-changes BEFORE the long Inbox chrome wait.
     _dismiss_nav_blockers(page)
+    if allow_session_recovery and needs_imds_relogin(page):
+        log.info("Search-nav sees expired session; re-logging in before Inbox navigation.")
+        return ensure_imds_session(page)
     # After a confirmed login, leftover Login DOM must not force a second OTP.
     if page_looks_offline(page):
         log.warning("Search-nav sees an offline page; not treating this as a 15-min network wait.")
@@ -2695,6 +2746,9 @@ def run_check(page):
             return False
 
         appeared = wait_for_check_results(page, timeout_ms=180000)
+        if not appeared and needs_imds_relogin(page):
+            log.info("Restoring IMDS session after session loss during Check...")
+            ensure_imds_session(page)
         sample = read_check_results_text(page)
         if appeared or check_results_present(sample) or is_passing_check_results_text(sample):
             log.info("Check results appeared.")
@@ -2710,9 +2764,19 @@ def wait_for_check_results(page, timeout_ms: int = 180000) -> bool:
     deadline = time.time() + timeout_ms / 1000.0
     last = ""
     while time.time() < deadline:
+        if needs_imds_relogin(page):
+            log.warning(
+                "Check wait aborted: IMDS session expired (login page detected)."
+            )
+            return False
         last = read_check_results_text(page)
         if check_results_present(last) or is_passing_check_results_text(last):
             return True
+        if page_text_indicates_public_login(last):
+            log.warning(
+                "Check wait aborted: page text looks like public login, not Check results."
+            )
+            return False
         page.wait_for_timeout(750)
     log.warning(
         "Check results waiter timed out. Last sample "
@@ -4802,9 +4866,7 @@ def accept_passed_mds(page, results):
         supplier_code = res.get("Supplier Code", "")
         part_no = res.get("Part/Item No.", "")
         log.info(f"Searching for MDS ID: {mds_id_num}")
-        if page_looks_offline(page) or (
-            on_public_login_page(page) and not logged_in_to_imds(page)
-        ):
+        if page_looks_offline(page) or needs_imds_relogin(page):
             if not ensure_imds_session(page):
                 res["Action Result"] = "Search Failed"
                 save_check_summary(results)
@@ -4932,9 +4994,7 @@ def reject_failed_mds(page, results):
             continue
         mds_id_num = parse_mds_id_number(res["MDS ID / Version"])
         log.info(f"Rejecting MDS ID: {mds_id_num}")
-        if page_looks_offline(page) or (
-            on_public_login_page(page) and not logged_in_to_imds(page)
-        ):
+        if page_looks_offline(page) or needs_imds_relogin(page):
             if not ensure_imds_session(page):
                 res["Action Result"] = "Search Failed"
                 save_check_summary(results)
@@ -5091,9 +5151,7 @@ def process_rows_and_export(page):
         retry_same = False
 
         try:
-            if page_looks_offline(page) or (
-                on_public_login_page(page) and not logged_in_to_imds(page)
-            ):
+            if page_looks_offline(page) or needs_imds_relogin(page):
                 if not ensure_imds_session(page):
                     raise RuntimeError("IMDS session could not be restored after a network drop.")
             elif not logged_in_to_imds(page) or not inbox_results_table_ready(page):

@@ -102,8 +102,16 @@ class OriginalAgentTests(unittest.TestCase):
             "\ndef leave_own_mds_for_inbox", 1
         )[0]
         self.assertIn("wait_for_imds_chrome", recover_fn)
-        self.assertIn("not burning a second OTP", recover_fn)
-        self.assertNotIn("imds_login", recover_fn)
+        self.assertIn("needs_imds_relogin", recover_fn)
+        self.assertIn("ensure_imds_session", recover_fn)
+        session_fn = text.split("def ensure_imds_session", 1)[1].split(
+            "\ndef recover_after_network_error", 1
+        )[0]
+        self.assertIn("reset_search_nav_chrome_recovery", session_fn)
+        check_wait_fn = text.split("def wait_for_check_results", 1)[1].split(
+            "\ndef extract_check_result", 1
+        )[0]
+        self.assertIn("needs_imds_relogin", check_wait_fn)
         leave_fn = text.split("def leave_own_mds_for_inbox", 1)[1].split(
             "\ndef navigate_to_search_page", 1
         )[0]
@@ -673,6 +681,17 @@ class PostLoginSessionTests(unittest.TestCase):
             imds_agent_v2.session_logged_in_after_reconnect(settling, login_succeeded=False)
         )
 
+    def test_page_text_indicates_public_login_after_session_timeout(self):
+        colab_login_body = (
+            "Login\nUser ID forgotten\nRequest new password\n"
+            "Registration\nRegister your company\nMulti-factor Authentication"
+        )
+        self.assertTrue(imds_agent_v2.page_text_indicates_public_login(colab_login_body))
+        check_panel = "Check results - 0 Error(s) / 0 Warning(s)"
+        self.assertFalse(imds_agent_v2.page_text_indicates_public_login(check_panel))
+        inbox = "Received MDSs\nnot yet browsed\nSearch"
+        self.assertFalse(imds_agent_v2.page_text_indicates_public_login(inbox))
+
     def test_leftover_three_and_ten_still_twenty_rows(self):
         saved_three = os.environ.pop("IMDS_ALLOW_THREE", None)
         saved_ten = os.environ.pop("IMDS_ALLOW_TEN", None)
@@ -956,7 +975,7 @@ class InboxRecoverTests(unittest.TestCase):
         self.assertIn("not a network drop", process_fn)
         self.assertIn("without re-login", process_fn)
         self.assertIn("page_looks_offline", process_fn)
-        self.assertIn("on_public_login_page", process_fn)
+        self.assertIn("needs_imds_relogin", process_fn)
 
 
 class _IngredientsLocator(_FakeLocator):
