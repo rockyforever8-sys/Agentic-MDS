@@ -208,6 +208,30 @@ class NumIterationsTests(unittest.TestCase):
         self.assertEqual(imds_agent_v2.resolve_num_iterations("5"), 5)
 
 
+class AdfDisabledHelpers(unittest.TestCase):
+    def test_element_adf_disabled_true_when_eval_says_so(self):
+        class _First:
+            def evaluate(self, _js):
+                return True
+
+        class _Loc:
+            def count(self):
+                return 1
+
+            @property
+            def first(self):
+                return _First()
+
+        self.assertTrue(imds_agent_v2._element_adf_disabled(_Loc()))
+
+    def test_element_adf_disabled_false_when_empty(self):
+        class _Loc:
+            def count(self):
+                return 0
+
+        self.assertFalse(imds_agent_v2._element_adf_disabled(_Loc()))
+
+
 class ForwardPromptHelpers(unittest.TestCase):
     def test_detects_previous_version_forward_prompt(self):
         text = (
@@ -1320,6 +1344,7 @@ class AcceptForwardInboxTests(unittest.TestCase):
             mock.patch.object(imds_agent_v2, "accept_mds", return_value=True),
             mock.patch.object(imds_agent_v2, "handle_forward_confirmation_modal"),
             mock.patch.object(imds_agent_v2, "wait_for_glass_pane_clear"),
+            mock.patch.object(imds_agent_v2, "_recover_forward_ready_after_accept"),
             mock.patch.object(
                 imds_agent_v2, "read_visible_mds_id", return_value="1470791560 / 1"
             ),

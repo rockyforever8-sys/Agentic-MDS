@@ -2794,6 +2794,8 @@ def _click_xpath_if_present(page, xpath, *, hover_first: bool = False) -> bool:
         if loc.count() == 0:
             return False
         target = loc.first
+        if _element_adf_disabled(loc):
+            return False
         if hover_first:
             try:
                 target.hover(force=True, timeout=3000)
@@ -2804,6 +2806,118 @@ def _click_xpath_if_present(page, xpath, *, hover_first: bool = False) -> bool:
         return True
     except Exception:
         return False
+
+
+def _element_adf_disabled(loc) -> bool:
+    """True when an ADF menu row is aria-disabled or has p_AFDisabled."""
+    try:
+        if loc.count() == 0:
+            return False
+        return bool(
+            loc.first.evaluate(
+                """el => {
+                    if (!el) return false;
+                    if (el.getAttribute('aria-disabled') === 'true') return true;
+                    if (el.classList && el.classList.contains('p_AFDisabled')) return true;
+                    return false;
+                }"""
+            )
+        )
+    except Exception:
+        return False
+
+
+def _forward_menu_disabled(page) -> bool:
+    for sel in ("#pt1\\:pt_mMenuForward", "[id='pt1:pt_mMenuForward']"):
+        try:
+            if _element_adf_disabled(page.locator(sel)):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _forward_action_disabled(page) -> bool:
+    for sel in ("#pt1\\:pt_cmiMenuForward", "[id='pt1:pt_cmiMenuForward']"):
+        try:
+            if _element_adf_disabled(page.locator(sel)):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _close_mds_dropdown_via_ingredients(page) -> None:
+    try:
+        click_ingredients_tab(page)
+        page.wait_for_timeout(400)
+    except Exception:
+        pass
+
+
+def _probe_forward_menu_enabled(page) -> bool | None:
+    """Return True/False when the MDS menu opens; None if the menu could not open."""
+    try:
+        if not _open_mds_file_menu(page):
+            return None
+        enabled = not _forward_menu_disabled(page) and not _forward_action_disabled(page)
+        _close_mds_dropdown_via_ingredients(page)
+        return enabled
+    except Exception as e:
+        log.warning(f"Forward-ready probe failed: {e}")
+        return None
+
+
+def _recover_forward_ready_after_accept(page) -> None:
+    """After Accept confirm, dismiss modals without Escape and wait for Forward to unlock."""
+    if passing_check_dialog_visible(page) and click_passing_check_accept(page):
+        log.info("Dismissed passing Check-results dialog after Accept.")
+        page.wait_for_timeout(1000)
+    wait_for_glass_pane_clear(
+        page, timeout_ms=8000, allow_escape=False, save_changes="yes"
+    )
+    try:
+        click_ingredients_tab(page)
+        page.wait_for_timeout(1200)
+    except Exception:
+        pass
+    wait_for_glass_pane_clear(
+        page, timeout_ms=4000, allow_escape=False, save_changes="yes"
+    )
+    _dismiss_leftover_user_dialogs_before_mds_menu(page)
+    first = _probe_forward_menu_enabled(page)
+    if first is True:
+        log.info("Forward menu is enabled after Accept.")
+        return
+    if first is None:
+        log.info("MDS menu not probeable yet after Accept; skipping long Forward wait.")
+        return
+    log.info("Forward menu disabled right after Accept; waiting for IMDS to finish processing.")
+    deadline = time.time() + 18
+    while time.time() < deadline:
+        if modal_dialog_visible(page):
+            if passing_check_dialog_visible(page):
+                click_passing_check_accept(page)
+            else:
+                dismiss_modal(page, allow_escape=False, save_changes="yes")
+            page.wait_for_timeout(400)
+            continue
+        probe = _probe_forward_menu_enabled(page)
+        if probe is True:
+            log.info("Forward menu is enabled after Accept.")
+            return
+        page.wait_for_timeout(700)
+    log.warning("Forward menu may still be disabled after Accept recovery timeout.")
+
+
+def _wait_search_id_field(page, timeout_ms: int = 20000) -> bool:
+    deadline = time.time() + timeout_ms / 1000.0
+    while time.time() < deadline:
+        if _search_id_field_ready(page):
+            return True
+        dismiss_modal(page, allow_escape=False, save_changes="no")
+        page.wait_for_timeout(400)
+    return _search_id_field_ready(page)
 
 
 def _dialog_or_glass_up(page) -> bool:
@@ -3226,16 +3340,20 @@ def _click_exact_forward_main(page) -> bool:
     """Click the Forward *menu* (pt_mMenuForward), not a leftover user dialog."""
     try:
         forward_main = page.locator(f"xpath={XP_FORWARD_MENU}")
-        if forward_main.count() > 0 and forward_main.is_visible():
-            try:
-                forward_main.hover(force=True)
-                page.wait_for_timeout(400)
-            except Exception:
-                pass
-            forward_main.click(force=True)
-            log.info("Clicked Forward main menu item (exact XPath).")
-            page.wait_for_timeout(1000)
-            return True
+        if forward_main.count() > 0:
+            if _element_adf_disabled(forward_main):
+                log.warning("Forward main menu is disabled (p_AFDisabled).")
+                return False
+            if forward_main.is_visible():
+                try:
+                    forward_main.hover(force=True)
+                    page.wait_for_timeout(400)
+                except Exception:
+                    pass
+                forward_main.click(force=True)
+                log.info("Clicked Forward main menu item (exact XPath).")
+                page.wait_for_timeout(1000)
+                return True
     except Exception as e:
         log.warning(f"Forward main menu exact click failed: {e}")
     log.warning("Forward main menu wrapper not visible; trying same-id td/a cells.")
@@ -3246,9 +3364,12 @@ def _click_exact_forward_main(page) -> bool:
             return True
     for sel in ("#pt1\\:pt_mMenuForward", "[id='pt1:pt_mMenuForward']"):
         try:
-            loc = page.locator(sel).first
+            loc = page.locator(sel)
             if loc.count() > 0:
-                loc.click(force=True, timeout=5000)
+                if _element_adf_disabled(loc):
+                    log.warning(f"Forward main menu disabled via {sel}.")
+                    return False
+                loc.first.click(force=True, timeout=5000)
                 log.info("Clicked Forward main menu via exact id pt1:pt_mMenuForward.")
                 page.wait_for_timeout(800)
                 return True
@@ -3259,15 +3380,21 @@ def _click_exact_forward_main(page) -> bool:
 
 def _click_exact_forward_action(page) -> bool:
     """Click pt1:pt_cmiMenuForward only. Never a leftover user-dialog td."""
+    if _forward_action_disabled(page):
+        log.warning("Forward action is disabled (IMDS still processing Accept?).")
+        return False
     for xp in XP_FORWARD_ACTION:
         if _click_xpath_if_present(page, xp):
             log.info(f"Clicked Forward action via XPath: {xp}")
             return True
     for sel in ("#pt1\\:pt_cmiMenuForward", "[id='pt1:pt_cmiMenuForward']"):
         try:
-            loc = page.locator(sel).first
+            loc = page.locator(sel)
             if loc.count() > 0:
-                loc.click(force=True, timeout=5000)
+                if _element_adf_disabled(loc):
+                    log.warning(f"Forward action disabled via {sel}.")
+                    return False
+                loc.first.click(force=True, timeout=5000)
                 log.info("Clicked Forward action via exact id pt1:pt_cmiMenuForward.")
                 return True
         except Exception as e:
@@ -3330,6 +3457,9 @@ def forward_mds(page):
             return False
         if _click_exact_forward_action(page):
             return True
+        if _forward_menu_disabled(page) or _forward_action_disabled(page):
+            log.warning("Forward submenu disabled; recovering post-Accept state before retry.")
+            _recover_forward_ready_after_accept(page)
         log.warning("Forward action not visible; closing dialogs and reopening MDS menu.")
         _dismiss_leftover_user_dialogs_before_mds_menu(page)
         if not _open_mds_file_menu(page):
@@ -3350,6 +3480,11 @@ def forward_mds(page):
     except Exception:
         pass
     page.wait_for_timeout(2000)
+    try:
+        click_ingredients_tab(page)
+        page.wait_for_timeout(1500)
+    except Exception:
+        pass
     save_screenshot(page, "after_forward.png")
     return True
 
@@ -3635,7 +3770,7 @@ def select_contact_person(page, contact_name=None, allow_fallback=True):
         return False
 
 # ---------- Complete Forward Recipients ----------
-def wait_for_forwarded_own_mds(page, received_id: str, timeout_s: float = 25) -> str:
+def wait_for_forwarded_own_mds(page, received_id: str, timeout_s: float = 40) -> str:
     """After Forward, IMDS opens a new own MDS (new ID, version 0.01). Stay on it.
 
     Contact / Add Recipient / Propose must run on this new ID. Searching the
@@ -3644,6 +3779,11 @@ def wait_for_forwarded_own_mds(page, received_id: str, timeout_s: float = 25) ->
     received_num = parse_mds_id_number(received_id)
     deadline = time.time() + timeout_s
     last = None
+    try:
+        click_ingredients_tab(page)
+        page.wait_for_timeout(800)
+    except Exception:
+        pass
     while time.time() < deadline:
         dismiss_modal(page, allow_escape=False)
         last = read_visible_mds_id(page) or extract_mds_id_version_early(page)
@@ -4491,10 +4631,16 @@ def search_mds_by_id(page, mds_id_num: str) -> bool:
     if not is_searchable_mds_id(mds_id_num):
         log.warning(f"Not searching invalid MDS ID {mds_id_num!r}.")
         return False
-    wait_for_glass_pane_clear(page, timeout_ms=5000, save_changes="no")
+    wait_for_glass_pane_clear(page, timeout_ms=5000, save_changes="no", allow_escape=False)
     if not navigate_to_search_page(page):
         return False
-    wait_for_glass_pane_clear(page, timeout_ms=3000, save_changes="no")
+    wait_for_glass_pane_clear(page, timeout_ms=3000, save_changes="no", allow_escape=False)
+    if not _wait_search_id_field(page):
+        log.warning("Search ID field not ready; attempting one chrome recovery.")
+        recover_imds_chrome_once(page)
+        if not navigate_to_search_page(page) or not _wait_search_id_field(page, 15000):
+            log.warning("Search ID field still missing after chrome recovery.")
+            return False
     set_browsed_filter(page)
     if not _fill_id_and_search(page, mds_id_num):
         return False
@@ -4614,6 +4760,7 @@ def open_first_result_on_content_page(page, mds_id_num: str) -> bool:
             )
             dismiss_modal(page, allow_escape=False, save_changes="no")
             if attempt < 3:
+                leave_own_mds_for_inbox(page)
                 if not search_mds_by_id(page, mds_id_num):
                     return False
                 continue
@@ -4626,6 +4773,7 @@ def open_first_result_on_content_page(page, mds_id_num: str) -> bool:
         )
         save_screenshot(page, f"after_doubleclick_{mds_id_num}.png")
         if attempt < 3:
+            leave_own_mds_for_inbox(page)
             if not search_mds_by_id(page, mds_id_num):
                 return False
     return False
@@ -4684,7 +4832,10 @@ def accept_passed_mds(page, results):
 
         handle_forward_confirmation_modal(page)
         page.wait_for_timeout(1500)
-        wait_for_glass_pane_clear(page, timeout_ms=5000)
+        wait_for_glass_pane_clear(
+            page, timeout_ms=8000, allow_escape=False, save_changes="yes"
+        )
+        _recover_forward_ready_after_accept(page)
         current_id = read_visible_mds_id(page) or extract_mds_id_version_early(page)
         auto_forwarded = own_mds_ready_for_recipients(mds_id_num, current_id)
         forward_note = ""
