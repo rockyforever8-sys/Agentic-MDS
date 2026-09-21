@@ -752,6 +752,29 @@ def parse_mds_id_number(visible: str | None) -> str:
     return match.group(1) if match else ""
 
 
+def parse_mds_version(visible: str | None) -> str:
+    if not visible:
+        return ""
+    m = re.search(r"/\s*([\d.]+)\s*$", str(visible).strip())
+    return m.group(1) if m else ""
+
+
+def versions_indicate_own_draft(received_id: str | None, on_screen_id: str | None) -> bool:
+    """True when Forward kept the same numeric ID but minted an own draft (e.g. /8 → /0.01)."""
+    rec = parse_mds_id_number(received_id)
+    own = parse_mds_id_number(on_screen_id)
+    if not rec or not own or rec != own:
+        return False
+    rv = parse_mds_version(received_id)
+    ov = parse_mds_version(on_screen_id)
+    if not rv or not ov or rv == ov:
+        return False
+    try:
+        return float(ov) <= 0.02 and float(rv) > float(ov)
+    except ValueError:
+        return ov.startswith("0.") and not rv.startswith("0.")
+
+
 def looks_like_inbox_table_chrome(text: str | None) -> bool:
     """True for Received MDSs list chrome, not an Ingredients ID / Version value."""
     t = " ".join(str(text or "").lower().split())
@@ -780,10 +803,12 @@ def looks_like_mds_id_value(text: str | None) -> bool:
 
 
 def own_mds_ready_for_recipients(received_id: str | None, on_screen_id: str | None) -> bool:
-    """True only when Forward minted a different numeric ID than the received MDS."""
+    """True when Forward minted an own MDS (new ID or same ID with own draft version)."""
     rec = parse_mds_id_number(received_id)
     own = parse_mds_id_number(on_screen_id)
-    return bool(own and rec and own != rec)
+    if own and rec and own != rec:
+        return True
+    return versions_indicate_own_draft(received_id, on_screen_id)
 
 
 def is_searchable_mds_id(visible: str | None) -> bool:
@@ -2357,7 +2382,7 @@ def extract_mds_id_version_early(page):
         if looks_like_inbox_table_chrome(body) and not ingredients_tree_ready(page):
             log.warning("Body text is inbox chrome; not using it as MDS ID.")
             return "EXTRACTION_FAILED"
-        match = re.search(r'(\d{10,}\s*/\s*[\d.]+)', body)
+        match = re.search(r"(\d{7,}\s*/\s*[\d.]+)", body)
         if match and looks_like_mds_id_value(match.group(1)):
             return match.group(1)
     except Exception as e:
@@ -3864,6 +3889,12 @@ def wait_for_forwarded_own_mds(page, received_id: str, timeout_s: float = 40) ->
                 "Completing contact, recipients, and propose on this new ID (not the received ID)."
             )
             return last_num
+        if versions_indicate_own_draft(received_id, last):
+            log.info(
+                f"Forward updated {received_id} to own draft {last}; "
+                "completing contact/recipients/propose on this sheet."
+            )
+            return last_num
         if own and last_num and last_num != received_num:
             log.info(f"On forwarded own MDS {last}; completing contact/recipients/propose here.")
             return last_num
@@ -4758,6 +4789,42 @@ def _double_click_first_result(page, mds_id_num: str) -> bool:
             return False
 
 
+def extract_mds_id_from_inbox_row(row_element) -> str:
+    """Parse ID / Version from a Received MDSs result row when Ingredients did not open."""
+    try:
+        text = row_element.inner_text(timeout=5000) or ""
+    except Exception:
+        try:
+            text = row_element.text_content(timeout=5000) or ""
+        except Exception:
+            text = ""
+    match = re.search(r"(\d{7,}\s*/\s*[\d.]+)", text)
+    if match and looks_like_mds_id_value(match.group(1)):
+        return match.group(1).strip()
+    return ""
+
+
+def try_open_inbox_mds_via_search(page, row_element, row_xpath: str) -> bool:
+    """When double-click stays on the inbox table, search the row's MDS ID and open it."""
+    visible = extract_mds_id_from_inbox_row(row_element)
+    mds_num = parse_mds_id_number(visible)
+    if not mds_num:
+        log.warning("Inbox row open failed and no MDS ID was found in the row text.")
+        return False
+    log.info(
+        f"Inbox double-click did not open Ingredients; searching MDS ID {mds_num} from row text."
+    )
+    if not return_to_inbox_results(page):
+        recover_inbox_list(page, reapply_filter=False)
+    if not search_mds_by_id(page, mds_num):
+        log.warning(f"Search-by-ID fallback failed for inbox row MDS {mds_num}.")
+        return False
+    if not open_first_result_on_content_page(page, mds_num):
+        log.warning(f"Could not open Ingredients after search fallback for {mds_num}.")
+        return False
+    return ensure_inbox_row_opened_as_mds(page, row_xpath)
+
+
 def ensure_inbox_row_opened_as_mds(page, row_xpath: str) -> bool:
     """After inbox double-click, wait for Ingredients ID — not tResult Export chrome."""
     for attempt in range(1, 3):
@@ -5233,10 +5300,18 @@ def process_rows_and_export(page):
             wait_networkidle(page, 15000)
             page.wait_for_timeout(2000)
             dismiss_modal(page, allow_escape=False, save_changes="no")
-            if not ensure_inbox_row_opened_as_mds(page, row_xpath):
-                log.warning(
-                    "Did not reach Ingredients after double-click; not checking from the inbox table."
-                )
+            opened = ensure_inbox_row_opened_as_mds(page, row_xpath)
+            if not opened:
+                opened = try_open_inbox_mds_via_search(page, row_element, row_xpath)
+                if opened:
+                    log.info(
+                        "Opened inbox MDS via search-by-ID fallback after double-click failed."
+                    )
+                else:
+                    log.warning(
+                        "Did not reach Ingredients after double-click; not checking from the inbox table."
+                    )
+            if not opened and not ingredients_tree_ready(page):
                 mds_id = "EXTRACTION_FAILED"
                 result_msg = "Open Failed (still on inbox list)"
                 overall = "FAIL"

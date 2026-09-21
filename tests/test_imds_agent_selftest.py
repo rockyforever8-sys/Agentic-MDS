@@ -681,6 +681,18 @@ class PostLoginSessionTests(unittest.TestCase):
             imds_agent_v2.session_logged_in_after_reconnect(settling, login_succeeded=False)
         )
 
+    def test_own_mds_same_id_draft_version(self):
+        received = "8827908 / 8"
+        own = "8827908 / 0.01"
+        self.assertTrue(imds_agent_v2.versions_indicate_own_draft(received, own))
+        self.assertTrue(imds_agent_v2.own_mds_ready_for_recipients(received, own))
+        self.assertFalse(
+            imds_agent_v2.own_mds_ready_for_recipients(received, "8827908 / 8")
+        )
+        self.assertTrue(
+            imds_agent_v2.own_mds_ready_for_recipients("1467141604 / 1", "1467999999 / 0.01")
+        )
+
     def test_page_text_indicates_public_login_after_session_timeout(self):
         colab_login_body = (
             "Login\nUser ID forgotten\nRequest new password\n"
