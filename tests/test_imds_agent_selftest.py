@@ -1622,5 +1622,91 @@ class AcceptChromeRecoveryTests(unittest.TestCase):
             self.assertLessEqual(first_goto, 1)
 
 
+PASSING_CHECK_DIALOG = (
+    "Check results\n"
+    "The MDS has passed all included checks. These checks do not cover all aspects "
+    "of IMDS data requirements. Further manual review may be required.\n"
+    "Accept\nReject\nCancel"
+)
+
+
+class _CheckAcceptLocator:
+    def __init__(self, page: "FakePassingCheckDialog", kind: str):
+        self.page = page
+        self.kind = kind
+        self.first = self
+
+    def count(self) -> int:
+        if not self.page.modal_up:
+            return 0
+        if self.kind in {"accept", "dialog"}:
+            return 1
+        return 0
+
+    def is_visible(self) -> bool:
+        return self.count() > 0
+
+    def click(self, force=False, timeout=0):
+        if self.kind != "accept":
+            raise RuntimeError(f"unexpected click {self.kind}")
+        self.page.clicks.append("accept")
+        self.page.modal_up = False
+
+    def inner_text(self, timeout=0):
+        if self.kind == "dialog" and self.page.modal_up:
+            return self.page.text
+        return ""
+
+
+class FakePassingCheckDialog:
+    def __init__(self, text: str = PASSING_CHECK_DIALOG, modal_up: bool = True):
+        self.text = text
+        self.modal_up = modal_up
+        self.clicks: list[str] = []
+
+    def wait_for_timeout(self, _ms: int):
+        return None
+
+    def locator(self, selector: str):
+        sel = (selector or "").lower()
+        if "lookupcompany" in sel:
+            return _CheckAcceptLocator(self, "none")
+        if "accept" in sel and ("afmodaldialog" in sel or "dcpopup" in sel or "ctbaccept" in sel or "pt_dcud" in sel):
+            return _CheckAcceptLocator(self, "accept")
+        if "afmodaldialog" in sel or "afmodalglasspane" in sel or "afblockingglasspane" in sel or "pt_dcud" in sel or "dcpopup" in sel:
+            return _CheckAcceptLocator(self, "dialog")
+        return _CheckAcceptLocator(self, "none")
+
+
+class PassingCheckAcceptTests(unittest.TestCase):
+    def test_clicks_visible_check_dialog_accept_not_cancel(self):
+        page = FakePassingCheckDialog()
+        self.assertTrue(imds_agent_v2.passing_check_dialog_visible(page))
+        self.assertTrue(imds_agent_v2.click_passing_check_accept(page))
+        self.assertEqual(page.clicks, ["accept"])
+        self.assertFalse(page.modal_up)
+        self.assertFalse(imds_agent_v2.passing_check_dialog_visible(page))
+        self.assertFalse(imds_agent_v2.click_passing_check_accept(page))
+
+    def test_accept_confirm_does_not_skip_visible_check_dialog(self):
+        page = FakePassingCheckDialog()
+        self.assertTrue(imds_agent_v2._click_accept_confirm_control(page))
+        self.assertEqual(page.clicks, ["accept"])
+        self.assertFalse(imds_agent_v2.passing_check_dialog_visible(page))
+
+    def test_blocking_check_dialog_is_not_an_accept_confirm(self):
+        page = FakePassingCheckDialog(
+            text=(
+                "Check results - 1 Error(s) / 0 Warning(s)\n"
+                "Contact must be specified\n"
+                "All existing errors need to be eliminated before any further processing may take place."
+            )
+        )
+        self.assertFalse(imds_agent_v2.passing_check_dialog_visible(page))
+        self.assertFalse(imds_agent_v2.click_passing_check_accept(page))
+        self.assertEqual(page.clicks, [])
+        self.assertTrue(page.modal_up)
+
+
 if __name__ == "__main__":
     unittest.main()

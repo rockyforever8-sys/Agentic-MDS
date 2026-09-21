@@ -2895,8 +2895,58 @@ def _click_exact_accept_menu(page) -> bool:
     return False
 
 
+def passing_check_dialog_visible(page) -> bool:
+    """True when the passing Check-results dialog (Accept / Reject / Cancel) is up.
+
+    That dialog is the accept confirmation. Forward behind it never opens the MDS menu.
+    """
+    if not modal_dialog_visible(page) and not _dialog_or_glass_up(page):
+        return False
+    text = visible_dialog_text(page)
+    if is_check_errors_blocking_prompt(text):
+        return False
+    return is_passing_check_results_text(text) or is_check_results_overlay_text(text)
+
+
+def click_passing_check_accept(page) -> bool:
+    """Click the visible Accept on a passing Check-results dialog. No-op otherwise."""
+    if not passing_check_dialog_visible(page):
+        return False
+    used = _click_first_matching(
+        page,
+        [
+            ".AFModalDialog a:has-text('Accept'):visible",
+            "#pt1\\:pt_dcud a:has-text('Accept'):visible",
+            "[id*='dcPopup'] a:has-text('Accept'):visible",
+            "xpath=//*[contains(@class,'AFModalDialog')]//a[contains(normalize-space(.),'Accept')]",
+            "xpath=//*[contains(@id,'dcPopup') and contains(@id,'ctbAccept')]//a",
+            "xpath=//*[contains(@id,'pt_dcud') and contains(@id,'ctbAccept')]//a",
+            "//*[@id='dcPopup:ctbAcceptMds']/a/span",
+            "//*[@id='dcPopup:ctbAcceptMds']/a",
+            "//*[@id='pt1:pt_dcud:ctbAccept']/a/span",
+            "//*[@id='pt1:pt_dcud:ctbAccept']/a",
+        ],
+    )
+    if not used:
+        log.warning("Passing Check-results dialog is up but its Accept control was not found.")
+        return False
+    log.info(f"Clicked Accept on passing Check-results dialog via {used}")
+    try:
+        page.wait_for_timeout(1500)
+    except Exception:
+        pass
+    wait_for_glass_pane_clear(page, timeout_ms=8000, allow_escape=False)
+    return not passing_check_dialog_visible(page)
+
+
 def _click_accept_confirm_control(page) -> bool:
-    """Click the Accept confirmation in dcPopup / pt1:pt_dcud. Not Escape or glass."""
+    """Click the Accept confirmation in dcPopup / pt1:pt_dcud. Not Escape or glass.
+
+    A passing Check-results dialog must use its visible Accept. A hidden
+    ctbAccept node must not count as success while that dialog is still up.
+    """
+    if passing_check_dialog_visible(page):
+        return click_passing_check_accept(page)
     for xp in XP_ACCEPT_CONFIRM:
         if _click_xpath_if_present(page, xp):
             log.info(f"Clicked Accept confirm via {xp}")
@@ -3248,6 +3298,10 @@ def _click_forward_ok(page) -> None:
 # ---------- Forward MDS ----------
 def forward_mds(page):
     log.info("Forwarding MDS using exact XPaths...")
+    if passing_check_dialog_visible(page) and not click_passing_check_accept(page):
+        log.warning("Forward blocked: Check-results dialog is still open.")
+        save_screenshot(page, "forward_action_not_found.png")
+        return False
     _dismiss_leftover_user_dialogs_before_mds_menu(page)
     for xp in XP_TOOLBAR_FORWARD:
         if _click_xpath_if_present(page, xp):

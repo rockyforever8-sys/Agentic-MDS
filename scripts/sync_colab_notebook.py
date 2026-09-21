@@ -10,7 +10,11 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-REF = "main"
+REF = "cursor/check-accept-before-forward"
+COLAB_URL = (
+    "https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/"
+    "cursor/check-accept-before-forward/Colab_Start_Here.ipynb"
+)
 
 
 def as_source_lines(text: str) -> list[str]:
@@ -40,12 +44,12 @@ def markdown_cell(source: str, cell_id: str) -> dict:
 def cells() -> list[dict]:
     return [
         markdown_cell(
-            """# Agentic MDS — one-button live run
+            f"""# Agentic MDS — one-button live run
 
 **Do not paste this `.ipynb` file into a code cell.** It is JSON. That causes `NameError: name 'true' is not defined`.
 
 Open it as a notebook:
-- [Open Colab_Start_Here.ipynb in Google Colab](https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/main/Colab_Start_Here.ipynb)
+- [Open Colab_Start_Here.ipynb in Google Colab]({COLAB_URL})
 - Or Colab **File → Upload notebook**
 
 This notebook runs the **original IMDS agent** (`imds_agent_v2.py`) — same XPaths and actions that already produced your Excel output. The only change is **secret authentication**: passwords stay in Colab 🔑, not in the script.
@@ -73,6 +77,10 @@ After a lost inbox list, **Received MDSs** + re-filter; do not re-login.
 
 Accept is not success until the confirmation control is clicked (do not treat a disappeared Accept menu as done). Wait for leftover `dcPopup:ctbAcceptMds` rather than retrying MDS menu through a dialog — that click kills Inbox chrome. After one chrome-loss, recover once via Received MDSs / MDS Request back; do not 4-attempt-loop remaining IDs and do not treat search-nav as a 15-min network drop. Forward uses exact `pt_cmiMenuForward` only — never a leftover user-dialog td. If Forward did not mint a new own-MDS ID, leave the inbox without Add Recipient. Inbox-table chrome (Export / hidden column) is not an MDS ID; do not Check from the search list.
 
+A passing **Check results** dialog (Accept / Reject / Cancel, “The MDS has passed all included checks”) is the accept confirmation. The agent clicks that visible **Accept** before Forward, and does not treat a hidden Accept node as success while the dialog is still up.
+
+Cell 1 clones `--branch {REF}` (not `main`). Runtime → Restart session, then run the cells from the top.
+
 Then click **Run IMDS until complete**. Output: `imds_output/check_summary.xlsx`.""",
             "md-intro",
         ),
@@ -87,10 +95,13 @@ if not (ROOT / ".git").exists():
     try:
         subprocess.check_call(["git", "clone", "--depth", "1", "--branch", REF, REPO, str(ROOT)])
     except subprocess.CalledProcessError:
+        if REF != "main":
+            raise
         subprocess.check_call(["git", "clone", "--depth", "1", REPO, str(ROOT)])
 else:
     fetched = False
-    for _ref in (REF, "main"):
+    refs = (REF,) if REF != "main" else (REF, "main")
+    for _ref in refs:
         try:
             subprocess.check_call(["git", "-C", str(ROOT), "fetch", "--depth", "1", "origin", _ref])
             subprocess.check_call(["git", "-C", str(ROOT), "checkout", "-B", _ref, f"origin/{{_ref}}"])
