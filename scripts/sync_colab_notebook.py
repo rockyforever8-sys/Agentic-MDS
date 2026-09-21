@@ -10,10 +10,10 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-REF = "cursor/check-accept-before-forward"
+REF = "main"
 COLAB_URL = (
     "https://colab.research.google.com/github/rockyforever8-sys/Agentic-MDS/blob/"
-    "cursor/check-accept-before-forward/Colab_Start_Here.ipynb"
+    "main/Colab_Start_Here.ipynb"
 )
 
 

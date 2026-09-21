@@ -6,7 +6,7 @@ import os, pathlib, subprocess
 
 ROOT = pathlib.Path("/content/Agentic-MDS")
 REPO = "https://github.com/rockyforever8-sys/Agentic-MDS.git"
-REF = os.environ.get("IMDS_GIT_REF", "cursor/check-accept-before-forward")
+REF = os.environ.get("IMDS_GIT_REF", "main")
 if not (ROOT / ".git").exists():
     try:
         subprocess.check_call(["git", "clone", "--depth", "1", "--branch", REF, REPO, str(ROOT)])
