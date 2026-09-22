@@ -689,9 +689,21 @@ class PostLoginSessionTests(unittest.TestCase):
         self.assertFalse(
             imds_agent_v2.own_mds_ready_for_recipients(received, "8827908 / 8")
         )
+        self.assertFalse(
+            imds_agent_v2.own_mds_ready_for_recipients(received, "8827908")
+        )
         self.assertTrue(
             imds_agent_v2.own_mds_ready_for_recipients("1467141604 / 1", "1467999999 / 0.01")
         )
+
+    def test_accept_pass_uses_full_mds_label_for_forward(self):
+        text = (ROOT / "imds_agent_v2.py").read_text(encoding="utf-8")
+        accept_fn = text.split("def accept_passed_mds", 1)[1].split(
+            "\ndef reject_failed_mds", 1
+        )[0]
+        self.assertIn("received_label", accept_fn)
+        self.assertIn("wait_for_forwarded_own_mds(page, received_label)", accept_fn)
+        self.assertNotIn("wait_for_forwarded_own_mds(page, mds_id_num)", accept_fn)
 
     def test_page_text_indicates_public_login_after_session_timeout(self):
         colab_login_body = (

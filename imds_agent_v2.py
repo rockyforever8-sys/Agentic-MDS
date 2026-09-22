@@ -802,13 +802,36 @@ def looks_like_mds_id_value(text: str | None) -> bool:
     return bool(re.search(r"\d{7,}\s*/\s*[\d.]+", s))
 
 
-def own_mds_ready_for_recipients(received_id: str | None, on_screen_id: str | None) -> bool:
-    """True when Forward minted an own MDS (new ID or same ID with own draft version)."""
+def body_indicates_own_mds(page) -> bool:
+    """True when the Ingredients sheet is marked as the customer's own MDS."""
+    try:
+        body = page.locator("body").text_content(timeout=2000) or ""
+    except Exception:
+        return False
+    t = body.lower()
+    return (
+        "component (own mds)" in t
+        or "forwarded version of a received mds" in t
+        or "(own mds)" in t
+    )
+
+
+def own_mds_ready_for_recipients(
+    received_id: str | None,
+    on_screen_id: str | None,
+    *,
+    page=None,
+) -> bool:
+    """True when Forward minted an own MDS (new ID, draft version, or own-MDS body text)."""
     rec = parse_mds_id_number(received_id)
     own = parse_mds_id_number(on_screen_id)
     if own and rec and own != rec:
         return True
-    return versions_indicate_own_draft(received_id, on_screen_id)
+    if versions_indicate_own_draft(received_id, on_screen_id):
+        return True
+    if page and body_indicates_own_mds(page) and rec and own and rec == own:
+        return True
+    return False
 
 
 def is_searchable_mds_id(visible: str | None) -> bool:
@@ -3883,21 +3906,20 @@ def wait_for_forwarded_own_mds(page, received_id: str, timeout_s: float = 40) ->
             own = "component (own mds)" in body.lower() or "forwarded version of a received mds" in body.lower()
         except Exception:
             own = False
-        if own_mds_ready_for_recipients(received_id, last):
+        if own_mds_ready_for_recipients(received_id, last, page=page):
             log.info(
                 f"Forward created own MDS {last} from received {received_id}. "
                 "Completing contact, recipients, and propose on this new ID (not the received ID)."
             )
-            return last_num
-        if versions_indicate_own_draft(received_id, last):
+            return last or ""
+        if own and last_num and last_num == received_num:
             log.info(
-                f"Forward updated {received_id} to own draft {last}; "
-                "completing contact/recipients/propose on this sheet."
+                f"On own-MDS sheet {last} (same module number as received {received_id})."
             )
-            return last_num
+            return last or ""
         if own and last_num and last_num != received_num:
             log.info(f"On forwarded own MDS {last}; completing contact/recipients/propose here.")
-            return last_num
+            return last or ""
         page.wait_for_timeout(500)
     log.warning(
         f"Did not see a new own-MDS ID after Forward (still {last!r} vs received {received_id}). "
@@ -4929,7 +4951,8 @@ def accept_passed_mds(page, results):
                 res["Action Result"] = "Skipped (invalid MDS ID)"
             save_check_summary(results)
             continue
-        mds_id_num = parse_mds_id_number(res["MDS ID / Version"])
+        received_label = (res.get("MDS ID / Version") or "").strip()
+        mds_id_num = parse_mds_id_number(received_label)
         supplier_code = res.get("Supplier Code", "")
         part_no = res.get("Part/Item No.", "")
         log.info(f"Searching for MDS ID: {mds_id_num}")
@@ -4966,7 +4989,9 @@ def accept_passed_mds(page, results):
         )
         _recover_forward_ready_after_accept(page)
         current_id = read_visible_mds_id(page) or extract_mds_id_version_early(page)
-        auto_forwarded = own_mds_ready_for_recipients(mds_id_num, current_id)
+        auto_forwarded = own_mds_ready_for_recipients(
+            received_label, current_id, page=page
+        )
         forward_note = ""
         forwarded_id = parse_mds_id_number(current_id) if auto_forwarded else ""
         if auto_forwarded:
@@ -4985,16 +5010,20 @@ def accept_passed_mds(page, results):
             if not forward_mds(page):
                 log.warning("Forwarding failed; will retry once if the ID is still the received MDS.")
                 forward_note = "Forward Failed"
-            forwarded_id = wait_for_forwarded_own_mds(page, mds_id_num)
-            if not own_mds_ready_for_recipients(mds_id_num, forwarded_id):
+            forwarded_id = wait_for_forwarded_own_mds(page, received_label)
+            if not own_mds_ready_for_recipients(
+                received_label, forwarded_id, page=page
+            ):
                 log.warning(
                     "On-screen MDS ID is still the received ID; retrying Forward once with exact XPaths."
                 )
                 _dismiss_leftover_user_dialogs_before_mds_menu(page)
                 if forward_mds(page):
                     forward_note = ""
-                forwarded_id = wait_for_forwarded_own_mds(page, mds_id_num)
-            if own_mds_ready_for_recipients(mds_id_num, forwarded_id):
+                forwarded_id = wait_for_forwarded_own_mds(page, received_label)
+            if own_mds_ready_for_recipients(
+                received_label, forwarded_id, page=page
+            ):
                 log.info(
                     f"Received MDS {mds_id_num} is now own MDS {forwarded_id}. "
                     "Will not search the received ID again until contact/recipients/propose finish on this sheet."
