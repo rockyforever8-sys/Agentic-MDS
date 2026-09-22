@@ -770,7 +770,13 @@ def versions_indicate_own_draft(received_id: str | None, on_screen_id: str | Non
     if not rv or not ov or rv == ov:
         return False
     try:
-        return float(ov) <= 0.02 and float(rv) > float(ov)
+        rv_f = float(rv)
+        ov_f = float(ov)
+        if ov_f <= 0.02 and rv_f > ov_f:
+            return True
+        # Received supplier versions (e.g. /7, /8) often become own /0.01 or /1.01.
+        if rv_f >= 1.0 and ov_f <= 1.05 and rv_f > ov_f:
+            return True
     except ValueError:
         return ov.startswith("0.") and not rv.startswith("0.")
 
@@ -813,6 +819,8 @@ def body_indicates_own_mds(page) -> bool:
         "component (own mds)" in t
         or "forwarded version of a received mds" in t
         or "(own mds)" in t
+        or " is an own mds" in t
+        or "own mds)" in t
     )
 
 
@@ -1642,10 +1650,7 @@ def read_visible_mds_id(page) -> str | None:
     except Exception:
         pass
     try:
-        expand = page.locator(f"xpath={XP_INGREDIENTS_EXPAND}")
-        if expand.count() == 0:
-            return None
-        body = page.locator("body").text_content(timeout=1500) or ""
+        body = page.locator("body").text_content(timeout=3000) or ""
         found = id_ver.search(body)
         if found and looks_like_mds_id_value(found.group(1)):
             return found.group(1)
@@ -3882,7 +3887,7 @@ def select_contact_person(page, contact_name=None, allow_fallback=True):
         return False
 
 # ---------- Complete Forward Recipients ----------
-def wait_for_forwarded_own_mds(page, received_id: str, timeout_s: float = 40) -> str:
+def wait_for_forwarded_own_mds(page, received_id: str, timeout_s: float = 60) -> str:
     """After Forward, IMDS opens a new own MDS (new ID, version 0.01). Stay on it.
 
     Contact / Add Recipient / Propose must run on this new ID. Searching the
@@ -5030,6 +5035,26 @@ def accept_passed_mds(page, results):
                 )
                 if forward_note == "Forward Failed":
                     forward_note = ""
+            elif body_indicates_own_mds(page):
+                vis = read_visible_mds_id(page) or extract_mds_id_version_early(page)
+                if own_mds_ready_for_recipients(received_label, vis, page=page):
+                    forwarded_id = vis or forwarded_id
+                    log.info(
+                        f"Forward complete: own-MDS body text with on-screen ID {vis!r} "
+                        f"(received {received_label})."
+                    )
+                    forward_note = ""
+                else:
+                    log.warning(
+                        "Forward did not mint a new own MDS; leaving the inbox without Add Recipient."
+                    )
+                    res["Action Result"] = "Forward Failed"
+                    save_check_summary(results)
+                    if not leave_own_mds_for_inbox(page):
+                        log.warning(
+                            "Could not return to Received MDSs search after Forward Failed."
+                        )
+                    continue
             else:
                 log.warning(
                     "Forward did not mint a new own MDS; leaving the inbox without Add Recipient."

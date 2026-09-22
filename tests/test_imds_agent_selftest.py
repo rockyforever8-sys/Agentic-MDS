@@ -686,6 +686,9 @@ class PostLoginSessionTests(unittest.TestCase):
         own = "8827908 / 0.01"
         self.assertTrue(imds_agent_v2.versions_indicate_own_draft(received, own))
         self.assertTrue(imds_agent_v2.own_mds_ready_for_recipients(received, own))
+        self.assertTrue(
+            imds_agent_v2.versions_indicate_own_draft("523552464 / 7", "523552464 / 1.01")
+        )
         self.assertFalse(
             imds_agent_v2.own_mds_ready_for_recipients(received, "8827908 / 8")
         )
