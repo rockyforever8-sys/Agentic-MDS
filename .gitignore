@@ -1,5 +1,7 @@
 docs/demo-frames/
 imds_output/
+ppap_agent/data/*.db
+ppap_agent/data/seed_meta.json
 imds_output_selftest/
 .env
 *.enc
