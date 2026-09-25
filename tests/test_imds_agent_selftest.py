@@ -149,12 +149,14 @@ class OriginalAgentTests(unittest.TestCase):
         self.assertNotIn("td:has-text('Accept')", accept_fn)
         self.assertNotIn("[role='menuitem']:has-text('Accept')", accept_fn)
         fwd_fn = text.split("def _click_exact_forward_main", 1)[1].split(
-            "\ndef list_contact_option_names", 1
+            "\ndef _click_exact_forward_action", 1
         )[0]
         self.assertNotIn("td:has-text('Forward')", fwd_fn)
         self.assertNotIn("a:has-text('Forward')", fwd_fn)
         self.assertNotIn("pt_dlgUserDialog", fwd_fn)
-        self.assertIn("pt1:pt_cmiMenuForward", fwd_fn)
+        self.assertIn("_js_click_adf_menu_id", fwd_fn)
+        self.assertIn("pt1:pt_mMenuForward", fwd_fn)
+        self.assertNotIn("pt_cmiMenuForward", text.split("XP_FORWARD_MENU_CLICK", 1)[1].split("]", 1)[0])
         process_fn = text.split("def process_rows_and_export", 1)[1].split(
             "\ndef orchestrate", 1
         )[0]

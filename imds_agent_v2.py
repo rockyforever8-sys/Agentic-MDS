@@ -387,9 +387,6 @@ XP_FORWARD_MENU_CLICK = [
     "//*[@id='pt1:pt_mMenuForward']/td[1]",
     "//*[@id='pt1:pt_mMenuForward']//a",
     XP_FORWARD_MENU,
-    "//*[@id='pt1:pt_cmiMenuForward']/td[2]",
-    "//*[@id='pt1:pt_cmiMenuForward']/td[1]",
-    "//*[@id='pt1:pt_cmiMenuForward']",
 ]
 XP_FORWARD_OK = "//*[@id='pt1:pt_dcud:ctbOk']/a"
 XP_SUPPLIER_DATA = "//*[@id='pt1:sdiDetailSupplier::disAcr']"
@@ -2925,6 +2922,35 @@ def _click_xpath_if_present(page, xpath, *, hover_first: bool = False) -> bool:
         return False
 
 
+def _js_click_adf_menu_id(page, element_id: str) -> bool:
+    """Click an ADF menu row by id when Playwright visibility checks block force click on <tr>."""
+    try:
+        clicked = page.evaluate(
+            """(id) => {
+                const el = document.getElementById(id);
+                if (!el) return false;
+                if (el.getAttribute('aria-disabled') === 'true') return false;
+                if (el.classList && el.classList.contains('p_AFDisabled')) return false;
+                const tds = el.querySelectorAll('td');
+                const target = tds.length ? tds[tds.length - 1] : el;
+                try { el.focus(); } catch (e) {}
+                try { target.focus(); } catch (e) {}
+                target.dispatchEvent(
+                    new MouseEvent('click', { bubbles: true, cancelable: true, view: window })
+                );
+                return true;
+            }""",
+            element_id,
+        )
+        if clicked:
+            log.info(f"JS-clicked ADF menu row {element_id}.")
+            page.wait_for_timeout(800)
+        return bool(clicked)
+    except Exception as e:
+        log.warning(f"JS click on ADF menu {element_id} failed: {e}")
+        return False
+
+
 def _element_adf_disabled(loc) -> bool:
     """True when an ADF menu row is aria-disabled or has p_AFDisabled."""
     try:
@@ -3457,41 +3483,19 @@ def _click_exact_forward_main(page) -> bool:
     """Click the Forward *menu* (pt_mMenuForward), not a leftover user dialog."""
     try:
         forward_main = page.locator(f"xpath={XP_FORWARD_MENU}")
-        if forward_main.count() > 0:
-            if _element_adf_disabled(forward_main):
-                log.warning("Forward main menu is disabled (p_AFDisabled).")
-                return False
-            if forward_main.is_visible():
-                try:
-                    forward_main.hover(force=True)
-                    page.wait_for_timeout(400)
-                except Exception:
-                    pass
-                forward_main.click(force=True)
-                log.info("Clicked Forward main menu item (exact XPath).")
-                page.wait_for_timeout(1000)
-                return True
-    except Exception as e:
-        log.warning(f"Forward main menu exact click failed: {e}")
-    log.warning("Forward main menu wrapper not visible; trying same-id td/a cells.")
+        if forward_main.count() > 0 and _element_adf_disabled(forward_main):
+            log.warning("Forward main menu is disabled (p_AFDisabled).")
+            return False
+    except Exception:
+        pass
     for xp in XP_FORWARD_MENU_CLICK:
         if _click_xpath_if_present(page, xp, hover_first=True):
-            log.info(f"Clicked Forward via XPath: {xp}")
+            log.info(f"Clicked Forward main via XPath: {xp}")
             page.wait_for_timeout(800)
             return True
-    for sel in ("#pt1\\:pt_mMenuForward", "[id='pt1:pt_mMenuForward']"):
-        try:
-            loc = page.locator(sel)
-            if loc.count() > 0:
-                if _element_adf_disabled(loc):
-                    log.warning(f"Forward main menu disabled via {sel}.")
-                    return False
-                loc.first.click(force=True, timeout=5000)
-                log.info("Clicked Forward main menu via exact id pt1:pt_mMenuForward.")
-                page.wait_for_timeout(800)
-                return True
-        except Exception as e:
-            log.warning(f"Exact Forward menu id click failed: {e}")
+    if _js_click_adf_menu_id(page, "pt1:pt_mMenuForward"):
+        return True
+    log.warning("Forward main menu wrapper not visible; td/JS clicks did not open Forward.")
     return False
 
 
@@ -3504,6 +3508,8 @@ def _click_exact_forward_action(page) -> bool:
         if _click_xpath_if_present(page, xp):
             log.info(f"Clicked Forward action via XPath: {xp}")
             return True
+    if _js_click_adf_menu_id(page, "pt1:pt_cmiMenuForward"):
+        return True
     for sel in ("#pt1\\:pt_cmiMenuForward", "[id='pt1:pt_cmiMenuForward']"):
         try:
             loc = page.locator(sel)
